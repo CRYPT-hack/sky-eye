@@ -41,3 +41,30 @@ firewall on **Private** networks only. Set `api.auth.mode: token` and
 Exit code 2 with a short message means a startup problem (bad config value, port
 already in use, missing weights, no CUDA). Exit code 1 means the engine did not stop
 within 5 s and was ended forcibly.
+
+## Dashboard
+
+The website in `dashboard/` (React + TypeScript, built with Vite) shows the live
+video, the detected trucks and the engine status. The engine serves the built copy
+from `dashboard/dist/` at `/`. It looks for the build when it starts, so build first,
+then start (or restart) the engine. Needs Node.js 22.12 or newer with npm (tested
+with Node 24.13).
+
+Build:
+
+```
+cd dashboard
+npm ci
+npm run build
+```
+
+Work on the dashboard with live reload: start the engine as usual (port 8000), then
+run `npm run dev` in `dashboard/` and open the URL it prints. The dev server forwards
+`/api`, `/media`, `/stream.mjpg` and `/ws` to the engine at `127.0.0.1:8000`.
+`npm test` runs the tests and `npm run typecheck` checks the types.
+
+Token mode (`api.auth.mode: token`): the dashboard asks for the token once and saves
+it in the browser. Images, clips, the video stream and the live connection cannot
+send headers, so their URLs carry `?token=...`, which can show up in access logs,
+including the engine's own log in `data/logs/`. Use token mode on trusted networks
+only.
