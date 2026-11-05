@@ -8,7 +8,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import av
@@ -153,8 +153,18 @@ class EvidenceRecorder:
     on_done callbacks run on the single worker thread.
     """
 
-    def __init__(self, data_dir: Path, before_s: float, after_s: float) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        before_s: float,
+        after_s: float,
+        max_width: int = 1280,
+        max_fps: float = 30.0,
+    ) -> None:
         self.data_dir = Path(data_dir)
+        self._max_width = max_width
+        self._min_interval = 1.0 / max_fps - 1e-3
+        self._last_ts: float | None = None
         self._before_s = before_s
         self._after_s = after_s
         self._ring = FrameRingBuffer(before_s + after_s + 1)
@@ -163,8 +173,19 @@ class EvidenceRecorder:
         self._futures: list[Future] = []
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="evidence")
 
+    def _downscale(self, frame: Frame) -> Frame:
+        h, w = frame.image.shape[:2]
+        if w <= self._max_width:
+            return frame
+        size = (self._max_width, max(1, round(h * self._max_width / w)))
+        return replace(frame, image=cv2.resize(frame.image, size, interpolation=cv2.INTER_AREA))
+
     def push(self, frame: Frame) -> None:
         with self._lock:
+            if self._last_ts is not None and frame.ts - self._last_ts < self._min_interval:
+                return
+            self._last_ts = frame.ts
+            frame = self._downscale(frame)
             self._ring.push(frame)
             finished = []
             for job in self._pending:

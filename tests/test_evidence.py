@@ -106,3 +106,38 @@ def test_odd_frame_size_clip(tmp_path):
     rec.close()
     assert done == [path]
     assert count_frames(path)[1] > 0
+
+
+def _clip_info(path):
+    with av.open(str(path)) as c:
+        st = c.streams.video[0]
+        n = sum(1 for _ in c.decode(st))
+        return n, st.codec_context.width, st.codec_context.height, float(st.average_rate)
+
+
+def _run(tmp_path, n, fps, size=(320, 240)):
+    rec = EvidenceRecorder(tmp_path, before_s=5, after_s=5)
+    path = tmp_path / "c.mp4"
+    for i in range(n):
+        f = moving_frame(i, size=size)
+        rec.push(Frame(f.image, i / fps, f.wall_time, i))
+        if i == 0:
+            rec.start_clip("k", 0.0, path, lambda p: None)
+    rec.close()
+    return _clip_info(path)
+
+
+def test_60fps_input_capped_to_30fps(tmp_path):
+    n, _, _, fps = _run(tmp_path, 120, 60.0)
+    assert abs(n - 60) <= 2
+    assert abs(fps - 30) <= 1
+
+
+def test_large_frames_downscaled_to_1280(tmp_path):
+    _, w, h, _ = _run(tmp_path, 10, 30.0, size=(1920, 1080))
+    assert (w, h) == (1280, 720)
+
+
+def test_2997fps_keeps_every_frame(tmp_path):
+    n, _, _, _ = _run(tmp_path, 60, 29.97)
+    assert n == 60
