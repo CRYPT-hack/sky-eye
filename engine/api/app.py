@@ -4,7 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import queue
-from dataclasses import asdict, dataclass
+import threading
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -27,6 +28,7 @@ VERSION = "0.1.0"
 BOUNDARY = "frame"
 STATUS_INTERVAL_S = 1.0
 WS_POLL_S = 0.05
+WS_GOING_AWAY = 1001
 
 
 @dataclass
@@ -38,6 +40,9 @@ class EngineContext:
     data_dir: Path
     api: ApiConfig
     token: str | None = None
+    # Set when the engine is shutting down (Ctrl+C): long-lived responses
+    # (MJPEG stream, WebSocket) end so the HTTP server can stop.
+    shutdown: threading.Event = field(default_factory=threading.Event)
 
 
 def _runtime_json(runtime: RuntimeSettings) -> dict[str, Any]:
@@ -119,7 +124,7 @@ def create_app(ctx: EngineContext) -> FastAPI:
 
         async def frames():
             last: bytes | None = None
-            while not await request.is_disconnected():
+            while not ctx.shutdown.is_set() and not await request.is_disconnected():
                 jpeg = ctx.pipeline.latest_jpeg()
                 if jpeg is not None and jpeg is not last:
                     last = jpeg
@@ -140,7 +145,7 @@ def create_app(ctx: EngineContext) -> FastAPI:
         loop = asyncio.get_running_loop()
         next_status = 0.0
         try:
-            while True:
+            while not ctx.shutdown.is_set():
                 if loop.time() >= next_status:
                     next_status = loop.time() + STATUS_INTERVAL_S
                     await ws.send_json(
@@ -152,6 +157,7 @@ def create_app(ctx: EngineContext) -> FastAPI:
                     await asyncio.sleep(WS_POLL_S)
                     continue
                 await ws.send_json(msg)
+            await ws.close(code=WS_GOING_AWAY)
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:

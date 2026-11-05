@@ -7,7 +7,9 @@ import os
 import socket
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from types import FrameType
 
 import uvicorn
 
@@ -26,6 +28,9 @@ from engine.tracking import build_tracker
 log = logging.getLogger(__name__)
 
 _STOP_TIMEOUT_S = 5.0
+# Backstop: uvicorn cancels responses still open this long after an exit request.
+_GRACEFUL_SHUTDOWN_S = 3
+_hard_exit = os._exit  # replaced in tests
 
 
 def load_dotenv(path: Path) -> None:
@@ -113,6 +118,63 @@ def build_engine(cfg: AppConfig) -> EngineContext:
     )
 
 
+class EngineServer(uvicorn.Server):
+    """uvicorn server that starts the engine once it is listening and tells the
+    app when it is stopping, so open MJPEG/WebSocket responses end at once."""
+
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        shutdown: threading.Event,
+        on_started: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(config)
+        self._shutdown = shutdown
+        self._on_started = on_started
+
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+        self._shutdown.set()
+        super().handle_exit(sig, frame)
+        # uvicorn re-raises the captured signal after run() returns; for SIGBREAK
+        # (Ctrl+Break) or SIGTERM that kills the process before the pipeline is
+        # stopped. main() stops everything itself, so let run() just return.
+        captured = getattr(self, "_captured_signals", None)
+        if isinstance(captured, list):
+            captured.clear()
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().startup(sockets=sockets)
+        if self.started and not self.should_exit and self._on_started is not None:
+            self._on_started()
+
+
+def build_server(
+    ctx: EngineContext, on_started: Callable[[], None] | None = None
+) -> EngineServer:
+    config = uvicorn.Config(
+        create_app(ctx),
+        host=ctx.api.host,
+        port=ctx.api.port,
+        log_level="info",
+        log_config=None,  # uvicorn logs go to our handlers (console + rotating file)
+        timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_S,
+    )
+    return EngineServer(config, shutdown=ctx.shutdown, on_started=on_started)
+
+
+def _bind(host: str, port: int) -> socket.socket:
+    """Take the HTTP port up front, so a busy port fails before anything runs."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        return socket.create_server((host, port), family=family, backlog=2048)
+    except OSError as exc:
+        raise ConfigError(
+            f"cannot listen on {host}:{port} (api.host / api.port): {exc.strerror or exc}. "
+            "Another program, or another sky-eye, may be using the port: stop it or "
+            "change api.port."
+        ) from exc
+
+
 def _lan_ip() -> str:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -120,6 +182,14 @@ def _lan_ip() -> str:
             return s.getsockname()[0]
     except OSError:
         return "127.0.0.1"
+
+
+def _dashboard_url(host: str, port: int) -> str:
+    if host in ("", "0.0.0.0", "::"):
+        host = _lan_ip()
+    if ":" in host:
+        host = f"[{host}]"
+    return f"http://{host}:{port}/"
 
 
 def _fail(message: str) -> int:
@@ -136,6 +206,22 @@ def _stop_pipeline(ctx: EngineContext) -> bool:
         log.warning("pipeline did not stop within %.0f s; exiting anyway", _STOP_TIMEOUT_S)
         return False
     return True
+
+
+def shutdown_engine(ctx: EngineContext) -> None:
+    """Stop the pipeline and close the database. If the pipeline does not stop
+    within 5 s, flush the logs and exit the process with code 1."""
+    ctx.shutdown.set()
+    try:
+        clean = _stop_pipeline(ctx)
+    except KeyboardInterrupt:  # another Ctrl+C while waiting: stop waiting
+        clean = False
+    if clean:
+        ctx.repo.close()
+        log.info("engine stopped")
+        return
+    logging.shutdown()
+    _hard_exit(1)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -155,26 +241,34 @@ def main(argv: list[str] | None = None) -> int:
             print("OK")
             return 0
         setup_logging(cfg.evidence.data_dir)
-        ctx = build_engine(cfg)
+        sock = _bind(cfg.api.host, cfg.api.port)
+        try:
+            ctx = build_engine(cfg)
+        except BaseException:
+            sock.close()
+            raise
     except (ConfigError, DetectorError) as exc:
         return _fail(f"error: {exc}")
 
-    app = create_app(ctx)
-    server = uvicorn.Server(
-        uvicorn.Config(app, host=cfg.api.host, port=cfg.api.port, log_level="info")
-    )
-    clean = True
-    try:
+    url = _dashboard_url(cfg.api.host, cfg.api.port)
+
+    def on_started() -> None:
+        # only once the server is listening: the pipeline, then the URL
         ctx.pipeline.start()
-        print(f"Dashboard: http://{_lan_ip()}:{cfg.api.port}/", flush=True)
-        server.run()
+        log.info("listening on %s:%d; dashboard at %s", cfg.api.host, cfg.api.port, url)
+        print(f"Dashboard: {url}", flush=True)
+
+    server = build_server(ctx, on_started)
+    try:
+        server.run(sockets=[sock])
     except KeyboardInterrupt:
         pass
+    except SystemExit:  # uvicorn exits like this when its startup fails
+        if server.started:
+            raise
     finally:
-        clean = _stop_pipeline(ctx)
-        if clean:
-            ctx.repo.close()
-    if not clean:
-        logging.shutdown()
-        os._exit(0)
+        sock.close()
+        shutdown_engine(ctx)
+    if not server.started:
+        return _fail("error: the HTTP server failed to start; see the log above")
     return 0
