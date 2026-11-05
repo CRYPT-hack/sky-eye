@@ -385,9 +385,13 @@ def test_stop_with_clip_backlog_is_prompt(tmp_path, monkeypatch):
 
     started = threading.Event()
 
-    def slow_write(frames, path, fps):
+    def slow_write(frames, path, fps, should_stop=None):
         started.set()
-        time.sleep(0.5)
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            if should_stop is not None and should_stop():
+                raise evidence_mod.ClipAborted(str(path))
+            time.sleep(0.01)
         path.write_bytes(b"clip")
 
     monkeypatch.setattr(evidence_mod, "write_clip", slow_write)
@@ -407,12 +411,12 @@ def test_stop_with_clip_backlog_is_prompt(tmp_path, monkeypatch):
         assert started.wait(5.0)
         t0 = time.monotonic()
         rig.pipeline.stop()  # a full flush would encode 6 x 0.5 s
-        assert time.monotonic() - t0 < 1.5
+        assert time.monotonic() - t0 < 1.0  # even the running encode gives up
         recs = rig.repo.list_trucks()
         assert len(recs) == 6
         media = rig.data_dir / "media"
         with_clip = [r for r in recs if r.clip_path is not None]
-        assert 1 <= len(with_clip) < 6  # the running encode finished, the rest dropped
+        assert len(with_clip) < 6  # unfinished clips were dropped
         for r in recs:
             stem = f"{r.run_id}_{r.track_id}.mp4"
             if r.clip_path is None:

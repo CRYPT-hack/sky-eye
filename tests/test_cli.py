@@ -75,8 +75,12 @@ def test_build_engine_with_fake_detector(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
     video = make_video(tmp_path / "v.mp4", 5)
     cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}"))
+    stale = cfg.evidence.data_dir / "media" / "2026-11-05" / "1_3.mp4.part"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"left by a forced exit")
     ctx = build_engine(cfg)
     try:
+        assert not stale.exists()  # partial clips from an earlier run are removed
         assert ctx.pipeline.status().source_state == "starting"
         assert ctx.repo.count_trucks(1) == 0  # run 1 exists
         assert ctx.data_dir == cfg.evidence.data_dir

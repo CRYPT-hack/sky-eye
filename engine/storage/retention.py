@@ -7,6 +7,23 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+PARTIAL_CLIP_GLOB = "*.mp4.part"
+
+
+def remove_partial_clips(media_root: Path) -> int:
+    """Delete clip temp files left by a crash or a forced exit; return how many."""
+    removed = 0
+    for part in Path(media_root).rglob(PARTIAL_CLIP_GLOB):
+        try:
+            part.unlink()
+            removed += 1
+        except OSError as exc:
+            logger.warning("could not delete partial clip %s: %s", part, exc)
+    if removed:
+        logger.info("removed %d partial clip file(s) left by an earlier run", removed)
+    return removed
+
+
 def enforce_retention(
     media_root: Path, max_bytes: int, keep: Iterable[Path] = frozenset()
 ) -> list[Path]:

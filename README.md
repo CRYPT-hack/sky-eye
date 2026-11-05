@@ -31,7 +31,7 @@ over a small HTTP API with a live MJPEG stream.
 
 Evidence is written to `data/media/<date>/` (`_full.jpg`, `_crop.jpg`, `.mp4` per
 truck); logs (including the HTTP server's) to `data/logs/sky-eye.log`. Press Ctrl+C
-to stop; clips that have not started encoding are dropped, so the stop is quick. For
+to stop; clips that are not finished yet are dropped, so the stop is quick. For
 a file source the API keeps serving after the video ends so you can browse the trucks.
 
 To reach the API from a phone on the same Wi-Fi, allow Python through the Windows

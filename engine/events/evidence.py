@@ -27,6 +27,10 @@ _encoder_lock = threading.Lock()
 _encoder_cache: str | None = None
 
 
+class ClipAborted(Exception):
+    """An encode was given up because the engine is stopping."""
+
+
 class FrameRingBuffer:
     """Keeps frames whose ts >= newest.ts - seconds."""
 
@@ -49,7 +53,13 @@ def _even(image: np.ndarray) -> np.ndarray:
     return image[: h - (h % 2), : w - (w % 2)]
 
 
-def _encode(encoder: str, images: list[np.ndarray], path: Path, fps: float) -> None:
+def _encode(
+    encoder: str,
+    images: list[np.ndarray],
+    path: Path,
+    fps: float,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
     height, width = images[0].shape[:2]
     with av.open(str(path), "w", format="mp4") as container:
         stream = container.add_stream(encoder, rate=max(1, round(fps)))
@@ -59,6 +69,8 @@ def _encode(encoder: str, images: list[np.ndarray], path: Path, fps: float) -> N
         if encoder == "libx264":
             stream.options = {"preset": "veryfast", "crf": "23", "threads": _X264_THREADS}
         for image in images:
+            if should_stop is not None and should_stop():
+                raise ClipAborted(str(path))
             av_frame = av.VideoFrame.from_ndarray(image, format="bgr24")
             for packet in stream.encode(av_frame):
                 container.mux(packet)
@@ -99,11 +111,17 @@ def pick_h264_encoder() -> str:
         )
 
 
-def write_clip(frames: list[Frame], path: Path, fps: float) -> None:
+def write_clip(
+    frames: list[Frame],
+    path: Path,
+    fps: float,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
     """Write frames as an H.264 yuv420p MP4 with even dimensions.
 
     Encodes to ``<name>.part`` next to ``path`` and renames it only once the
-    encode succeeded, so ``path`` is either a complete clip or absent.
+    encode succeeded, so ``path`` is either a complete clip or absent. Raises
+    ClipAborted (leaving no file) as soon as ``should_stop()`` returns True.
     """
     if not frames:
         raise ValueError("cannot write a clip with no frames")
@@ -111,7 +129,7 @@ def write_clip(frames: list[Frame], path: Path, fps: float) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + _PART_SUFFIX)
     try:
-        _encode(pick_h264_encoder(), [_even(f.image) for f in frames], tmp, fps)
+        _encode(pick_h264_encoder(), [_even(f.image) for f in frames], tmp, fps, should_stop)
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -199,6 +217,7 @@ class EvidenceRecorder:
         self._pending: list[_Job] = []  # collecting frames
         self._futures: list[Future] = []  # submitted, possibly not done
         self._aborted = False
+        self._abort_evt = threading.Event()  # tells a running encode to give up
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="evidence")
 
     def _downscale(self, frame: Frame) -> Frame:
@@ -272,11 +291,13 @@ class EvidenceRecorder:
             self._futures = [f for f in self._futures if not f.done()]
 
     def abort(self) -> None:
-        """Drop every clip that has not started encoding (no on_done for them).
+        """Drop every clip that is not finished yet (no on_done for them).
 
-        Safe from any thread and idempotent; later start_clip() calls are
-        skipped. A clip that is already encoding still finishes.
+        Clips that have not started encoding are dropped; one that is encoding
+        gives up at its next frame and leaves no file. Safe from any thread and
+        idempotent; later start_clip() calls are skipped.
         """
+        self._abort_evt.set()
         with self._lock:
             self._aborted = True
             dropped = len(self._pending)
@@ -300,13 +321,17 @@ class EvidenceRecorder:
             return
         self._futures.append(self._executor.submit(self._run, job))
 
-    @staticmethod
-    def _run(job: _Job) -> None:
+    def _run(self, job: _Job) -> None:
         if not job.frames:
             log.warning("clip %s has no frames; skipped", job.key)
             return
         try:
-            write_clip(job.frames, job.path, _clip_fps(job.frames))
+            write_clip(
+                job.frames, job.path, _clip_fps(job.frames), should_stop=self._abort_evt.is_set
+            )
+        except ClipAborted:
+            log.info("clip %s abandoned: the engine is stopping", job.key)
+            return
         except Exception:
             log.exception("failed to write clip %s", job.path)
             return

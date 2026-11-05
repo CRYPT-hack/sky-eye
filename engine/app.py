@@ -23,7 +23,7 @@ from engine.events.manager import EventManager
 from engine.logging_setup import setup_logging
 from engine.pipeline import Pipeline, RuntimeSettings
 from engine.sources import build_source
-from engine.storage import TruckRepository, media_dir
+from engine.storage import TruckRepository, media_dir, remove_partial_clips
 from engine.tracking import build_tracker
 
 log = logging.getLogger(__name__)
@@ -104,7 +104,7 @@ def build_engine(cfg: AppConfig) -> EngineContext:
         )
         repo = TruckRepository(data_dir / "sky-eye.db")
         run_id = repo.create_run(label, cfg.model_dump_json())
-        media_dir(data_dir)
+        remove_partial_clips(media_dir(data_dir))
         bus = EventBus()
         manager = EventManager(
             repo,

@@ -157,17 +157,22 @@ from engine.events.evidence import write_clip  # noqa: E402
 
 
 class GatedWriter:
-    """Stand-in for write_clip: blocks every encode until release() is called."""
+    """Stand-in for write_clip: blocks every encode until release() is called;
+    like the real encoder it gives up (ClipAborted) once should_stop() is true."""
 
     def __init__(self) -> None:
         self.started: list = []
         self.started_evt = threading.Event()
         self._gate = threading.Event()
 
-    def __call__(self, frames, path, fps) -> None:
+    def __call__(self, frames, path, fps, should_stop=None) -> None:
         self.started.append(path)
         self.started_evt.set()
-        assert self._gate.wait(10), "gate never released"
+        deadline = time.monotonic() + 10
+        while not self._gate.wait(0.01):
+            if should_stop is not None and should_stop():
+                raise evidence_mod.ClipAborted(str(path))
+            assert time.monotonic() < deadline, "gate never released"
         path.write_bytes(b"clip")
 
     def release(self) -> None:
@@ -225,9 +230,9 @@ def test_clip_written_via_temp_file(tmp_path, monkeypatch):
     seen: list = []
     real = evidence_mod._encode
 
-    def spy(encoder, images, path, fps):
+    def spy(encoder, images, path, fps, *rest):
         seen.append(path)
-        real(encoder, images, path, fps)
+        real(encoder, images, path, fps, *rest)
 
     monkeypatch.setattr(evidence_mod, "_encode", spy)
     path = tmp_path / "c.mp4"
@@ -239,7 +244,7 @@ def test_clip_written_via_temp_file(tmp_path, monkeypatch):
 
 
 def test_failed_encode_leaves_no_files(tmp_path, monkeypatch):
-    def broken(encoder, images, path, fps):
+    def broken(encoder, images, path, fps, *rest):
         Path(path).write_bytes(b"half a clip")
         raise RuntimeError("encoder died")
 
@@ -266,18 +271,17 @@ def test_abort_drops_unstarted_jobs(tmp_path, monkeypatch):
     rec.start_clip("pending", 1.9, tmp_path / "pending.mp4", done.append)
     rec.abort()
     rec.start_clip("late", 1.9, tmp_path / "late.mp4", done.append)  # after abort: skipped
-    writer.release()
     t0 = time.monotonic()
-    rec.close()
+    rec.close()  # the gate is never released: the running encode must give up
     assert time.monotonic() - t0 < 1.0
-    assert done == [tmp_path / "running.mp4"]  # the started encode still completes
+    assert done == []  # no on_done for the aborted encode nor the dropped clips
     assert writer.started == [tmp_path / "running.mp4"]
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["running.mp4"]
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_close_drop_pending(tmp_path, monkeypatch):
     calls: list = []
-    monkeypatch.setattr(evidence_mod, "write_clip", lambda f, p, fps: calls.append(p))
+    monkeypatch.setattr(evidence_mod, "write_clip", lambda f, p, fps, **k: calls.append(p))
     rec = EvidenceRecorder(tmp_path, before_s=0.5, after_s=0.5)
     done: list = []
     _fill(rec, 60)
@@ -309,3 +313,29 @@ def test_snapshot_in_non_ascii_dir(tmp_path):
     img = cv2.imdecode(np.fromfile(str(full), dtype=np.uint8), cv2.IMREAD_COLOR)
     assert img is not None and img.shape[:2] == (240, 320)
     assert crop.is_file()
+
+
+@pytest.mark.parametrize("stop_after", [0, 3])
+def test_aborted_encode_leaves_no_files(tmp_path, stop_after):
+    calls = [0]
+
+    def should_stop() -> bool:
+        calls[0] += 1
+        return calls[0] > stop_after
+
+    path = tmp_path / "a.mp4"
+    with pytest.raises(evidence_mod.ClipAborted):
+        write_clip([moving_frame(i) for i in range(20)], path, FPS, should_stop=should_stop)
+    assert list(tmp_path.iterdir()) == []  # neither the clip nor its .part
+
+
+def test_remove_partial_clips(tmp_path):
+    from engine.storage import remove_partial_clips
+
+    day = tmp_path / "2026-11-05"
+    day.mkdir()
+    (day / "1_3.mp4.part").write_bytes(b"half")
+    (day / "1_2.mp4").write_bytes(b"clip")
+    (day / "1_2_full.jpg").write_bytes(b"jpg")
+    assert remove_partial_clips(tmp_path) == 1
+    assert sorted(p.name for p in day.iterdir()) == ["1_2.mp4", "1_2_full.jpg"]
