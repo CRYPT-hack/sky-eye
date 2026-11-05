@@ -1,10 +1,22 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 
 beforeEach(() => {
   window.location.hash = "";
+  // The live page talks to the engine; keep these tests off the network.
+  vi.stubGlobal("fetch", () => new Promise(() => {}));
+  vi.stubGlobal(
+    "WebSocket",
+    class {
+      close() {}
+    },
+  );
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 function navLink(name: string) {

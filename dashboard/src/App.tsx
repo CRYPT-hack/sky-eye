@@ -1,4 +1,6 @@
 import { useEffect, type ReactNode } from "react";
+import { ApiProvider } from "./apiContext";
+import LivePage from "./live/LivePage";
 import { href, useRoute, type Route } from "./router";
 
 type Section = "live" | "trucks" | "status";
@@ -75,9 +77,8 @@ function pageTitle(route: Route): string {
   }
 }
 
-// Stand-ins until the real pages land (Live: Task 5, Trucks: Task 6, Status: Task 7).
-const PLACEHOLDER: Record<Route["page"], string> = {
-  live: "The live drone video, truck counts and the latest trucks will show here.",
+// Stand-ins until the real pages land (Trucks: Task 6, Status: Task 7).
+const PLACEHOLDER: Record<Exclude<Route["page"], "live">, string> = {
   trucks: "Every saved truck will show here, with a date filter.",
   truck: "The photos, the clip and the details of this truck will show here.",
   status: "Engine and detector details and the detection settings will show here.",
@@ -99,7 +100,7 @@ function BrandMark() {
   );
 }
 
-export default function App() {
+function Shell() {
   const route = useRoute();
   const title = pageTitle(route);
   const current = sectionOf(route);
@@ -137,11 +138,23 @@ export default function App() {
           <div className="page-head">
             <h1 className="page-title">{title}</h1>
           </div>
-          <div className="empty">
-            <p>{PLACEHOLDER[route.page]}</p>
-          </div>
+          {route.page === "live" ? (
+            <LivePage />
+          ) : (
+            <div className="empty">
+              <p>{PLACEHOLDER[route.page]}</p>
+            </div>
+          )}
         </div>
       </main>
     </>
+  );
+}
+
+export default function App() {
+  return (
+    <ApiProvider>
+      <Shell />
+    </ApiProvider>
   );
 }
