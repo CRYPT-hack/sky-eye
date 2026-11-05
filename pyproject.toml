@@ -16,6 +16,7 @@ dependencies = [
     "pyyaml~=6.0",
     "numpy>=2.0",
     "torch",
+    "trackers~=2.7",
 ]
 
 [dependency-groups]
