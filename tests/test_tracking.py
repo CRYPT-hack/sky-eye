@@ -86,3 +86,31 @@ def test_two_trucks_two_ids():
     for i in range(4):
         res = step(t, i, [det(10 + 2 * i, 20), det(200 + 2 * i, 180)])
     assert len({tr.track_id for tr in res.confirmed}) == 2
+
+
+def test_low_score_detection_confirmed():
+    t = make_tracker()
+    low = Detection(box=(10.0, 100.0, 50.0, 130.0), score=0.5, class_name="truck")
+    results = [step(t, i, [low]) for i in range(3)]
+    assert [len(r.confirmed) for r in results] == [0, 0, 1]
+
+
+def test_ended_id_never_confirmed_again_at_29_97_fps():
+    fps = 29.97
+    for hidden in range(58, 66):
+        t = ByteTrackTracker(confirm_hits=3, confirm_window=5, lost_timeout_s=2.0, fps=fps)
+        box = det(100)
+        ids: set[int] = set()
+        ended: set[int] = set()
+        i = 0
+        for _ in range(30):
+            ids.update(tr.track_id for tr in t.update([box], fake_frame(i, i / fps)).confirmed)
+            i += 1
+        for _ in range(hidden):
+            ended.update(t.update([], fake_frame(i, i / fps)).ended_ids)
+            i += 1
+        for _ in range(20):
+            r = t.update([box], fake_frame(i, i / fps))
+            assert not ({tr.track_id for tr in r.confirmed} & ended), hidden
+            ended.update(r.ended_ids)
+            i += 1

@@ -39,7 +39,10 @@ class ByteTrackTracker:
         self._tracker = _RfByteTrack(
             lost_track_buffer=math.ceil(lost_timeout_s * _REFERENCE_FPS),
             frame_rate=fps,
-            track_activation_threshold=0.0,  # any detection may start a track
+            track_activation_threshold=0.0,  # no extra gate on starting a track
+            # Only "high" detections can start a track, so make every detection
+            # high; the detector's own confidence threshold is the only filter.
+            high_conf_det_threshold=0.0,
             minimum_consecutive_frames=1,  # activate at once; we confirm ourselves
         )
         self._seq = 0
@@ -106,6 +109,11 @@ class ByteTrackTracker:
                 continue
             if frame.ts - state.last_seen_ts > self._lost_timeout_s:
                 del self._states[tid]
+                # Make the library forget it too, so the id can never be revived
+                # (its frame budget can outlast our time budget at fractional fps).
+                self._tracker.tracks = [
+                    t for t in self._tracker.tracks if t.tracker_id != tid
+                ]
                 if state.confirmed:
                     ended.append(tid)
         return TrackerResult(confirmed=confirmed, ended_ids=ended)
