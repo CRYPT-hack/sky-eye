@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import signal
 import socket
 import threading
 import time
@@ -241,3 +242,76 @@ def test_token_mode(tmp_path, monkeypatch):
                 assert ws.receive_json()["type"] == "status"
     finally:
         rig.repo.close()
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_open_mjpeg_viewer_does_not_block_shutdown(tmp_path):
+    from engine.app import build_server
+
+    rig = make_rig(tmp_path / "data")
+    rig.ctx.api = ApiConfig(host="127.0.0.1", port=_free_port(), stream_fps=50)
+    server = build_server(rig.ctx)
+    assert server.config.timeout_graceful_shutdown == 3  # backstop
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.time() + 10
+        while not server.started and time.time() < deadline:
+            time.sleep(0.02)
+        assert server.started
+        streaming = threading.Event()
+
+        def viewer() -> None:
+            url = f"http://127.0.0.1:{rig.ctx.api.port}/stream.mjpg"
+            try:
+                with httpx.Client(timeout=10) as c, c.stream("GET", url) as r:
+                    for _ in r.iter_bytes():
+                        streaming.set()
+            except httpx.HTTPError:
+                pass
+
+        viewer_thread = threading.Thread(target=viewer, daemon=True)
+        viewer_thread.start()
+        assert streaming.wait(5)
+        t0 = time.monotonic()
+        server.handle_exit(signal.SIGINT, None)  # what Ctrl+C does
+        thread.join(5)
+        assert not thread.is_alive(), "server still waiting for the MJPEG stream"
+        assert time.monotonic() - t0 < 2.5  # ended by the shutdown flag, not the backstop
+        assert rig.ctx.shutdown.is_set()
+        viewer_thread.join(5)
+        assert not viewer_thread.is_alive()
+    finally:
+        server.should_exit = server.force_exit = True
+        thread.join(5)
+        rig.repo.close()
+
+
+def test_ws_closes_on_shutdown(client, rig):
+    with client.websocket_connect("/ws") as ws:
+        assert ws.receive_json()["type"] == "status"
+        rig.ctx.shutdown.set()
+        with pytest.raises(WebSocketDisconnect) as exc:
+            for _ in range(200):
+                ws.receive_json()
+    assert exc.value.code == 1001
+
+
+def test_error_bodies_carry_api_version(client):
+    r = client.get("/api/trucks/999")
+    assert r.status_code == 404
+    assert r.json() == {"api": 1, "error": "truck not found"}
+    r = client.get("/no/such/route")
+    assert r.status_code == 404 and r.json()["api"] == 1
+    r = client.get("/api/trucks?limit=0")
+    assert r.status_code == 422
+    body = r.json()
+    assert body["api"] == 1 and body["error"] == "invalid request"
+    assert body["detail"][0]["loc"][-1] == "limit"
+    r = client.get("/media/2026-01-01/missing.jpg")
+    assert r.status_code == 404 and r.json()["api"] == 1

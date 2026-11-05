@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import os
+import signal
+import socket
+import threading
+import time
+from types import SimpleNamespace
 
+import httpx
 import pytest
 
 import engine.app as app_mod
@@ -11,15 +17,21 @@ from engine.detectors.fake import FakeDetector
 from tests.conftest import make_video
 
 
-def write_config(tmp_path, extra_detector: str = "", source: str = "") -> object:
+def write_config(tmp_path, extra_detector: str = "", source: str = "", extra: str = "") -> object:
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
         f"source:\n  type: file\n{source}\n"
         f"detector:\n  device: cpu\n{extra_detector}\n"
-        f"evidence:\n  data_dir: data\n",
+        f"evidence:\n  data_dir: data\n{extra}",
         encoding="utf-8",
     )
     return cfg
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def test_bad_config_exit_code_2(tmp_path, capsys):
@@ -63,8 +75,12 @@ def test_build_engine_with_fake_detector(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
     video = make_video(tmp_path / "v.mp4", 5)
     cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}"))
+    stale = cfg.evidence.data_dir / "media" / "2026-11-05" / "1_3.mp4.part"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"left by a forced exit")
     ctx = build_engine(cfg)
     try:
+        assert not stale.exists()  # partial clips from an earlier run are removed
         assert ctx.pipeline.status().source_state == "starting"
         assert ctx.repo.count_trucks(1) == 0  # run 1 exists
         assert ctx.data_dir == cfg.evidence.data_dir
@@ -188,3 +204,171 @@ def test_undecodable_dotenv_exit_code_2(tmp_path, capsys):
     assert main(["--config", str(cfg), "--check"]) == 2
     err = capsys.readouterr().err
     assert ".env" in err and "Traceback" not in err
+
+
+def test_port_in_use_exit_code_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    video = make_video(tmp_path / "v.mp4", 5)
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        cfg = write_config(
+            tmp_path,
+            source=f"  path: {video.as_posix()}",
+            extra=f"api:\n  host: 127.0.0.1\n  port: {port}\n",
+        )
+        assert main(["--config", str(cfg)]) == 2
+    out, err = capsys.readouterr()
+    assert str(port) in err and "api.port" in err
+    assert "Traceback" not in err
+    assert len(err.strip().splitlines()) == 1  # one paragraph
+    assert "Dashboard" not in out
+    assert not (tmp_path / "data" / "sky-eye.db").exists()  # no run was started
+
+
+def test_main_starts_pipeline_after_bind_and_stops_cleanly(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    servers = []
+
+    class Recording(app_mod.EngineServer):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            servers.append(self)
+
+    monkeypatch.setattr(app_mod, "EngineServer", Recording)
+    video = make_video(tmp_path / "v.mp4", 30)
+    port = _free_port()
+    cfg = write_config(
+        tmp_path,
+        source=f"  path: {video.as_posix()}\n  realtime: false",
+        extra=f"api:\n  host: 127.0.0.1\n  port: {port}\n",
+    )
+    result: dict = {}
+    thread = threading.Thread(
+        target=lambda: result.setdefault("code", main(["--config", str(cfg)])), daemon=True
+    )
+    thread.start()
+    try:
+        deadline = time.time() + 30
+        while not (servers and servers[0].started) and time.time() < deadline:
+            time.sleep(0.05)
+        assert servers and servers[0].started
+        status = httpx.get(f"http://127.0.0.1:{port}/api/status", timeout=5).json()["status"]
+        assert status["source_state"] in ("starting", "running", "ended")
+        assert "Dashboard: http://" in capsys.readouterr().out
+        servers[0].handle_exit(signal.SIGINT, None)
+        thread.join(10)
+        assert not thread.is_alive()
+        assert result["code"] == 0
+    finally:
+        if servers:
+            servers[0].should_exit = servers[0].force_exit = True
+        thread.join(5)
+
+
+def test_unclean_stop_exits_1_after_logging_shutdown(monkeypatch):
+    events: list = []
+    release = threading.Event()
+    monkeypatch.setattr(app_mod, "_STOP_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(app_mod.logging, "shutdown", lambda: events.append("logging.shutdown"))
+
+    def hard_exit(code):
+        events.append(("exit", code))
+        raise SystemExit(code)
+
+    monkeypatch.setattr(app_mod, "_hard_exit", hard_exit)
+    repo_closed: list = []
+    ctx = SimpleNamespace(
+        pipeline=SimpleNamespace(stop=lambda: release.wait(10)),  # never stops in time
+        repo=SimpleNamespace(close=lambda: repo_closed.append(1)),
+        shutdown=threading.Event(),
+    )
+    try:
+        with pytest.raises(SystemExit):
+            app_mod.shutdown_engine(ctx)
+    finally:
+        release.set()
+    assert events == ["logging.shutdown", ("exit", 1)]
+    assert ctx.shutdown.is_set()
+    assert repo_closed == []  # the pipeline may still be using it
+
+
+def test_clean_stop_closes_repo():
+    repo_closed: list = []
+    ctx = SimpleNamespace(
+        pipeline=SimpleNamespace(stop=lambda: None),
+        repo=SimpleNamespace(close=lambda: repo_closed.append(1)),
+        shutdown=threading.Event(),
+    )
+    app_mod.shutdown_engine(ctx)
+    assert repo_closed == [1] and ctx.shutdown.is_set()
+
+
+def test_dotenv_inline_comments(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text(
+        "SKY_E=value # comment\n"
+        'SKY_F="quoted # kept"\n'
+        "SKY_G='single # kept'  # trailing comment\n"
+        "SKY_H=a#b\n"
+        "SKY_I=tab\t# comment\n",
+        encoding="utf-8",
+    )
+    for k in ("SKY_E", "SKY_F", "SKY_G", "SKY_H", "SKY_I"):
+        monkeypatch.delenv(k, raising=False)
+    load_dotenv(tmp_path / ".env")
+    assert os.environ["SKY_E"] == "value"
+    assert os.environ["SKY_F"] == "quoted # kept"
+    assert os.environ["SKY_G"] == "single # kept"
+    assert os.environ["SKY_H"] == "a#b"  # no space before #: part of the value
+    assert os.environ["SKY_I"] == "tab"
+    for k in ("SKY_E", "SKY_F", "SKY_G", "SKY_H", "SKY_I"):
+        monkeypatch.delenv(k)
+
+
+def test_startup_summary_logged(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    video = make_video(tmp_path / "v.mp4", 5)
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}"))
+    with caplog.at_level("INFO", logger="engine.app"):
+        ctx = build_engine(cfg)
+    try:
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "v.mp4" in text and "320x240" in text and "30.00 fps" in text
+        assert "RF-DETR small" in text and "device cpu" in text
+        assert str(cfg.evidence.data_dir) in text
+    finally:
+        ctx.pipeline.stop()
+        ctx.repo.close()
+
+
+def test_uvicorn_logs_reach_rotating_file(tmp_path):
+    import logging
+
+    from engine.logging_setup import setup_logging
+    from tests.test_api import make_rig
+
+    import uvicorn
+
+    from engine.api.app import create_app
+
+    rig = make_rig(tmp_path / "data")
+    # uvicorn's default log config (what 0.1.0 used) keeps its loggers to itself
+    uvicorn.Config(create_app(rig.ctx), log_level="info")
+    log_path = setup_logging(tmp_path / "data")
+    try:
+        app_mod.build_server(rig.ctx)  # configures uvicorn logging as main() does
+        logging.getLogger("uvicorn.error").info("uvicorn says hi")
+        logging.getLogger("uvicorn.access").info('127.0.0.1:1 - "GET /x HTTP/1.1" 200')
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        text = log_path.read_text(encoding="utf-8")
+        assert "uvicorn says hi" in text
+        assert '"GET /x HTTP/1.1" 200' in text
+    finally:
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            if getattr(handler, "_sky_eye", False):
+                root.removeHandler(handler)
+                handler.close()
+        rig.repo.close()

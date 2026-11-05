@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from engine.storage.repository import TruckRecord, TruckRepository
-from engine.storage.retention import enforce_retention
+from engine.storage.retention import enforce_retention, remove_partial_clips
 
 
 def media_dir(data_dir: Path) -> Path:
@@ -19,4 +19,11 @@ def day_dir(data_dir: Path, when: datetime) -> Path:
     return path
 
 
-__all__ = ["TruckRecord", "TruckRepository", "media_dir", "day_dir", "enforce_retention"]
+__all__ = [
+    "TruckRecord",
+    "TruckRepository",
+    "media_dir",
+    "day_dir",
+    "enforce_retention",
+    "remove_partial_clips",
+]

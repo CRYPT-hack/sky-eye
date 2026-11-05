@@ -114,3 +114,28 @@ def test_ended_id_never_confirmed_again_at_29_97_fps():
             assert not ({tr.track_id for tr in r.confirmed} & ended), hidden
             ended.update(r.ended_ids)
             i += 1
+
+
+def test_irregular_frame_skips_keep_one_id():
+    # Realtime mode drops frames at a varying rate (inference 4.5-30 FPS): a truck
+    # moving at constant speed must keep one id however many frames were skipped.
+    t = make_tracker()
+    pattern = [1] * 6 + [3, 5, 7, 4, 6, 3, 7, 5]  # full rate, then every 3rd-7th frame
+    ids: set[int] = set()
+    ended: list[int] = []
+    i = k = 0
+    while i < 600:
+        x = 10.0 + 5.0 * i  # 150 px/s, box 40 px wide
+        r = step(t, i, [det(x)])
+        ids.update(tr.track_id for tr in r.confirmed)
+        ended += r.ended_ids
+        i += pattern[k % len(pattern)]
+        k += 1
+    assert len(ids) == 1
+    assert ended == []
+
+
+def test_library_lost_buffer_outlasts_our_timeout():
+    # Our lost_timeout_s rule must be the only thing that ends a track.
+    t = make_tracker()
+    assert t._tracker.maximum_time_without_update >= 2.0 + 1.0

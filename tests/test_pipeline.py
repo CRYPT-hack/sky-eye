@@ -376,3 +376,80 @@ def test_annotate_draws_without_mutating_frame():
     assert out.any()  # box and label were drawn
     assert not image.any()  # the frame (shared with the evidence buffer) is untouched
     assert np.array_equal(annotate(frame, []), image)
+
+
+def test_stop_with_clip_backlog_is_prompt(tmp_path, monkeypatch):
+    import threading
+
+    import engine.events.evidence as evidence_mod
+
+    started = threading.Event()
+
+    def slow_write(frames, path, fps, should_stop=None):
+        started.set()
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            if should_stop is not None and should_stop():
+                raise evidence_mod.ClipAborted(str(path))
+            time.sleep(0.01)
+        path.write_bytes(b"clip")
+
+    monkeypatch.setattr(evidence_mod, "write_clip", slow_write)
+    boxes = [(x, 0.0, x + 40.0, 30.0) for x in (0.0, 60.0, 120.0, 180.0, 240.0)]
+    boxes.append((0.0, 120.0, 40.0, 150.0))
+    video = make_video(tmp_path / "v.mp4", 300)  # 10 s at realtime pace
+    rig = Rig(
+        tmp_path,
+        video,
+        FakeDetector(lambda i: [truck(b) for b in boxes]),
+        realtime=True,
+        after_s=0.2,
+    )
+    try:
+        rig.pipeline.start()
+        assert wait_until(lambda: rig.pipeline.status().trucks_total == 6, 5.0)
+        assert started.wait(5.0)
+        t0 = time.monotonic()
+        rig.pipeline.stop()  # a full flush would encode 6 x 0.5 s
+        assert time.monotonic() - t0 < 1.0  # even the running encode gives up
+        recs = rig.repo.list_trucks()
+        assert len(recs) == 6
+        media = rig.data_dir / "media"
+        with_clip = [r for r in recs if r.clip_path is not None]
+        assert len(with_clip) < 6  # unfinished clips were dropped
+        for r in recs:
+            stem = f"{r.run_id}_{r.track_id}.mp4"
+            if r.clip_path is None:
+                assert not list(media.rglob(stem))
+    finally:
+        rig.close()
+
+
+def test_repeated_frame_failures_are_summarised(tmp_path, caplog, monkeypatch):
+    import engine.pipeline as pipeline_mod
+
+    clock = [0.0]
+    monkeypatch.setattr(pipeline_mod, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def always_fails(i: int) -> list[Detection]:
+        clock[0] += 1.0  # every frame takes "1 s"
+        raise RuntimeError(f"boom {i}")
+
+    video = make_video(tmp_path / "v.mp4", 30)
+    rig = Rig(tmp_path, video, FakeDetector(always_fails))
+    try:
+        with caplog.at_level(logging.ERROR, logger="engine.pipeline"):
+            rig.pipeline.start()
+            assert rig.pipeline.wait(10) is True
+        errors = [r for r in caplog.records if r.name == "engine.pipeline"]
+        tracebacks = [r for r in errors if r.exc_info]
+        summaries = [r for r in errors if not r.exc_info]
+        assert len(tracebacks) == 1  # full traceback for the first failure only
+        assert "boom 0" in str(tracebacks[0].exc_info[1])
+        # 29 more failures over 29 s: one line per 10 s, plus the rest at the end
+        assert 2 <= len(summaries) <= 4
+        counts = [int(r.getMessage().split()[0]) for r in summaries]
+        assert sum(counts) == 29
+        assert rig.pipeline.status().frames_processed == 0
+    finally:
+        rig.close()

@@ -160,3 +160,41 @@ def test_truck_to_json_without_media():
     js = truck_to_json(rec)
     assert js["clip_url"] is None and js["snapshot_url"] is None and js["crop_url"] is None
     assert js["first_seen"] == "2026-01-02T03:04:05Z"
+
+
+def test_retention_clears_db_clip_path_of_deleted_clip(tmp_path):
+    rig = Rig(tmp_path, max_bytes=1)  # every older clip must go
+    try:
+        for i in range(40):
+            rig.feed(i, i / 30, result(0.8, track_id=1))
+        rig.evidence.flush()
+        first = rig.repo.list_trucks()[0]
+        assert first.clip_path is not None  # the clip just written is never deleted
+        assert (tmp_path / "media" / first.clip_path).exists()
+        drain(rig.q)
+        for i in range(40, 90):
+            rig.feed(i, i / 30, result(0.8, track_id=2))
+        rig.evidence.flush()
+        old = rig.repo.get_truck(first.id)
+        new = next(r for r in rig.repo.list_trucks() if r.id != first.id)
+        assert old.clip_path is None
+        assert not (tmp_path / "media" / first.clip_path).exists()
+        assert new.clip_path is not None and (tmp_path / "media" / new.clip_path).exists()
+        updates = [m for m in drain(rig.q) if m["type"] == "truck.updated"]
+        assert any(m["truck"]["id"] == first.id and m["truck"]["clip_url"] is None for m in updates)
+    finally:
+        rig.close()
+
+
+def test_truck_created_logged(tmp_path, caplog):
+    rig = Rig(tmp_path)
+    try:
+        with caplog.at_level("INFO", logger="engine.events.manager"):
+            rig.feed(0, 0.0, result(0.8, track_id=7))
+        rec = rig.repo.list_trucks()[0]
+        assert any(
+            f"truck {rec.id} created" in r.getMessage() and "track 7" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        rig.close()

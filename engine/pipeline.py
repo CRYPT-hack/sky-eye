@@ -24,6 +24,7 @@ _RETRY_S = 0.005  # read() gave None but the source has not ended (live device)
 _FPS_WINDOW_S = 2.0
 _JPEG_QUALITY = 80
 _OOM_HINT = "CUDA out of memory: lower detector.input_size or use size: nano"
+_FAIL_SUMMARY_S = 10.0  # repeated frame failures: at most one log line per this period
 
 
 @dataclass
@@ -140,6 +141,10 @@ class Pipeline:
         self._capture_thread: threading.Thread | None = None
         self._infer_thread: threading.Thread | None = None
         self._oom_hinted = False
+        # frame-failure logging (inference thread only)
+        self._fail_logged_at: float | None = None
+        self._fail_suppressed = 0
+        self._fail_latest = ""
         # guarded by self._lock
         self._lock = threading.Lock()
         self._state = "starting"
@@ -167,12 +172,17 @@ class Pipeline:
             self._infer_thread.start()
 
     def stop(self) -> None:
-        """Stop both threads and wait for them; harmless if already finished."""
+        """Stop both threads and wait for them; harmless if already finished.
+
+        Clips that have not started encoding are dropped (fast stop); the end
+        of a file source instead finishes every clip.
+        """
         with self._lifecycle:
             never_started = not self._started
             self._started = True  # a stopped pipeline cannot be started
         self._stop_event.set()
         self._channel.cancel()
+        self._recorder.abort()
         if never_started:
             self._close_source()
             self._finish()
@@ -250,11 +260,14 @@ class Pipeline:
                 try:
                     self._process(frame)
                 except Exception as exc:
-                    log.exception("processing frame %d failed; frame skipped", frame.index)
+                    self._log_failure(frame, exc)
                     if _is_cuda_oom(exc) and not self._oom_hinted:
                         self._oom_hinted = True
                         log.error(_OOM_HINT)
+                else:
+                    self._summarise_failures(time.monotonic())
         finally:
+            self._summarise_failures(time.monotonic(), force=True)
             # On stop the capture thread may still be running: release it, and let
             # it finish its last recorder.push() before events.close() closes the
             # recorder.
@@ -262,6 +275,34 @@ class Pipeline:
             if self._capture_thread is not None:
                 self._capture_thread.join()
             self._finish()
+
+    def _log_failure(self, frame: Frame, exc: Exception) -> None:
+        """Full traceback for the first failure; while failures repeat, a count
+        at most every _FAIL_SUMMARY_S (called from an except block)."""
+        now = time.monotonic()
+        last = self._fail_logged_at
+        if last is None or (self._fail_suppressed == 0 and now - last >= _FAIL_SUMMARY_S):
+            log.exception("processing frame %d failed; frame skipped", frame.index)
+            self._fail_logged_at = now
+            return
+        self._fail_suppressed += 1
+        self._fail_latest = f"frame {frame.index}: {exc!r}"
+        self._summarise_failures(now)
+
+    def _summarise_failures(self, now: float, force: bool = False) -> None:
+        if not self._fail_suppressed or self._fail_logged_at is None:
+            return
+        elapsed = now - self._fail_logged_at
+        if not force and elapsed < _FAIL_SUMMARY_S:
+            return
+        log.error(
+            "%d more frame(s) failed in the last %.0f s and were skipped (latest %s)",
+            self._fail_suppressed,
+            elapsed,
+            self._fail_latest,
+        )
+        self._fail_logged_at = now
+        self._fail_suppressed = 0
 
     def _process(self, frame: Frame) -> None:
         self._detector.confidence = self._runtime.confidence

@@ -141,3 +141,43 @@ def test_retention_warns_when_only_images_remain(tmp_path, caplog):
         assert enforce_retention(tmp_path, 100) == []
     assert (tmp_path / "a.jpg").exists()
     assert caplog.records
+
+
+def test_clear_clip_paths(repo):
+    run_id = repo.create_run("s", "{}")
+    a = repo.insert_truck(make_rec(run_id, 1, clip_path="2026-11-05/a.mp4"))
+    b = repo.insert_truck(make_rec(run_id, 2, clip_path="2026-11-05/b.mp4"))
+    c = repo.insert_truck(make_rec(run_id, 3, clip_path="2026-11-05/c.mp4"))
+    assert sorted(repo.clear_clip_paths(["2026-11-05/a.mp4", "2026-11-05/c.mp4", "x.mp4"])) == [a, c]
+    assert repo.get_truck(a).clip_path is None
+    assert repo.get_truck(b).clip_path == "2026-11-05/b.mp4"
+    assert repo.get_truck(c).clip_path is None
+    assert repo.clear_clip_paths([]) == []
+
+
+def test_retention_never_deletes_kept_file(tmp_path):
+    root = tmp_path
+    for name in ("old.mp4", "new.mp4"):
+        (root / name).write_bytes(b"x" * 600)
+    now = time.time()
+    os.utime(root / "old.mp4", (now - 3600, now - 3600))
+    # over the limit, but the only other video is the one we must keep
+    assert enforce_retention(root, 100, keep={root / "old.mp4"}) == [root / "new.mp4"]
+    assert (root / "old.mp4").exists()
+
+
+def test_retention_skips_undeletable_file(tmp_path, monkeypatch):
+    for name in ("locked.mp4", "other.mp4"):
+        (tmp_path / name).write_bytes(b"x" * 600)
+    now = time.time()
+    os.utime(tmp_path / "locked.mp4", (now - 3600, now - 3600))
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if self.name == "locked.mp4":
+            raise PermissionError("in use")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    assert enforce_retention(tmp_path, 700) == [tmp_path / "other.mp4"]
+    assert (tmp_path / "locked.mp4").exists()

@@ -20,7 +20,7 @@ class _Model(BaseModel):
 class SourceConfig(_Model):
     type: Literal["file", "capture"] = "file"
     path: Path | None = None
-    device: int = 0
+    device: int = Field(default=0, ge=0)
     realtime: bool = True
     loop: bool = False
 
@@ -43,9 +43,9 @@ class DetectorConfig(_Model):
 
 
 class TrackerConfig(_Model):
-    confirm_hits: int = 3
-    confirm_window: int = 5
-    lost_timeout_s: float = 2.0
+    confirm_hits: int = Field(default=3, ge=1)
+    confirm_window: int = Field(default=5, ge=1)
+    lost_timeout_s: float = Field(default=2.0, gt=0)
 
     @model_validator(mode="after")
     def _hits_within_window(self) -> TrackerConfig:
@@ -56,10 +56,10 @@ class TrackerConfig(_Model):
 
 class EvidenceConfig(_Model):
     data_dir: Path = Path("data")
-    clip_before_s: float = 3
-    clip_after_s: float = 5
-    snapshot_window_s: float = 2
-    max_disk_gb: float = 20
+    clip_before_s: float = Field(default=3, ge=0)
+    clip_after_s: float = Field(default=5, gt=0)
+    snapshot_window_s: float = Field(default=2, ge=0)
+    max_disk_gb: float = Field(default=20, gt=0)
 
 
 class AuthConfig(_Model):
@@ -74,10 +74,10 @@ class AuthConfig(_Model):
 
 class ApiConfig(_Model):
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = Field(default=8000, ge=1, le=65535)
     auth: AuthConfig = Field(default_factory=AuthConfig)
-    stream_fps: int = 15
-    stream_max_width: int = 1280
+    stream_fps: int = Field(default=15, ge=1)
+    stream_max_width: int = Field(default=1280, ge=16)
 
 
 class AppConfig(_Model):
@@ -105,7 +105,11 @@ def load_config(path: Path) -> AppConfig:
     if not path.is_file():
         raise ConfigError(f"config file not found: {path}")
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8-sig")  # tolerate a BOM
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"cannot read config file {path}: {e}") from e
+    try:
+        raw = yaml.safe_load(text)
     except yaml.YAMLError as e:
         raise ConfigError(f"invalid YAML in {path}: {e}") from e
     if raw is None:
