@@ -11,6 +11,10 @@ TOKEN_HEADER = "x-skyeye-token"
 WS_UNAUTHORIZED = 4401
 
 
+def _is_public(path: str) -> bool:
+    return path == "/" or path.startswith("/assets/")
+
+
 def _presented_token(scope: Scope) -> str | None:
     for name, value in scope.get("headers", []):
         if name.decode("latin-1").lower() == TOKEN_HEADER:
@@ -21,7 +25,8 @@ def _presented_token(scope: Scope) -> str | None:
 
 
 class TokenAuthMiddleware:
-    """Require the shared token on every route except ``GET /``."""
+    """Require the shared token on every route except the dashboard shell
+    (``GET /`` and ``GET /assets/...``); the data behind it stays protected."""
 
     def __init__(self, app: ASGIApp, token: str | None) -> None:
         self.app = app
@@ -38,7 +43,7 @@ class TokenAuthMiddleware:
         if kind not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
-        if kind == "http" and scope["method"] == "GET" and scope["path"] == "/":
+        if kind == "http" and scope["method"] == "GET" and _is_public(scope["path"]):
             await self.app(scope, receive, send)
             return
         if self._authorized(scope):
@@ -46,6 +51,9 @@ class TokenAuthMiddleware:
             return
         if kind == "websocket":
             await receive()  # websocket.connect
+            # Accept, then close with an application code: a close before accept is an
+            # HTTP 403, and browsers then report 1006 instead of 4401.
+            await send({"type": "websocket.accept"})
             await send({"type": "websocket.close", "code": WS_UNAUTHORIZED})
             return
         body = json.dumps({"api": 1, "error": "unauthorized"}).encode()

@@ -5,6 +5,7 @@ import signal
 import socket
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -85,6 +86,45 @@ def test_build_engine_with_fake_detector(tmp_path, monkeypatch):
         assert ctx.repo.count_trucks(1) == 0  # run 1 exists
         assert ctx.data_dir == cfg.evidence.data_dir
         assert ctx.token is None
+    finally:
+        ctx.pipeline.stop()
+        ctx.repo.close()
+
+
+def test_build_engine_info(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    folder = tmp_path / "samples dir"
+    folder.mkdir()
+    video = make_video(folder / "clip.mp4", 5)
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}"))
+    ctx = build_engine(cfg)
+    try:
+        info = ctx.info
+        assert info["version"] == "0.1.0" and info["auth"] == "none"
+        assert info["source"]["type"] == "file" and info["source"]["name"] == "clip.mp4"
+        assert info["source"]["fps"] > 0
+        assert info["detector"] == {
+            "model": "rfdetr-small", "input_size": 512, "device": "cpu", "gpu": None,
+            "classes": ["truck"],
+        }
+        expected = Path(app_mod.__file__).resolve().parents[1] / "dashboard" / "dist"
+        assert ctx.dashboard_dir == expected
+    finally:
+        ctx.pipeline.stop()
+        ctx.repo.close()
+
+
+def test_build_engine_dashboard_dir_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    video = make_video(tmp_path / "v.mp4", 5)
+    cfg = load_config(
+        write_config(
+            tmp_path, source=f"  path: {video.as_posix()}", extra="api:\n  dashboard_dir: web\n"
+        )
+    )
+    ctx = build_engine(cfg)
+    try:
+        assert ctx.dashboard_dir == tmp_path / "web"
     finally:
         ctx.pipeline.stop()
         ctx.repo.close()

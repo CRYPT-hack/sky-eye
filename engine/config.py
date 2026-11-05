@@ -78,6 +78,7 @@ class ApiConfig(_Model):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     stream_fps: int = Field(default=15, ge=1)
     stream_max_width: int = Field(default=1280, ge=16)
+    dashboard_dir: Path | None = None  # None = <repo>/dashboard/dist
 
 
 class AppConfig(_Model):
@@ -88,7 +89,8 @@ class AppConfig(_Model):
     api: ApiConfig = Field(default_factory=ApiConfig)
 
 
-_PATH_FIELDS = (("source", "path"), ("detector", "weights"), ("evidence", "data_dir"))
+_PATH_FIELDS = (("source", "path"), ("detector", "weights"), ("evidence", "data_dir"),
+                ("api", "dashboard_dir"))
 
 
 def _resolve_paths(raw: dict[str, Any], base: Path) -> None:

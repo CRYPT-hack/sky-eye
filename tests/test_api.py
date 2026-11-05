@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import signal
 import socket
 import threading
@@ -40,7 +41,23 @@ class Rig:
     bus: EventBus
 
 
-def make_rig(data_dir: Path, mode: str = "none", token: str | None = None) -> Rig:
+INFO = {
+    "version": "0.1.0",
+    "source": {"type": "file", "name": "clip.mp4", "fps": 25.0},
+    "detector": {
+        "model": "rfdetr-small", "input_size": 512, "device": "cpu", "gpu": None,
+        "classes": ["truck"],
+    },
+    "auth": "none",
+}
+
+
+def make_rig(
+    data_dir: Path,
+    mode: str = "none",
+    token: str | None = None,
+    dashboard_dir: Path | None = None,
+) -> Rig:
     data_dir.mkdir(parents=True, exist_ok=True)
     repo = TruckRepository(data_dir / "sky-eye.db")
     bus = EventBus()
@@ -52,6 +69,8 @@ def make_rig(data_dir: Path, mode: str = "none", token: str | None = None) -> Ri
         data_dir=data_dir,
         api=ApiConfig(auth=AuthConfig(mode=mode), stream_fps=50),
         token=token,
+        info={**INFO, "auth": mode},
+        dashboard_dir=dashboard_dir,
     )
     return Rig(ctx, repo, bus)
 
@@ -83,8 +102,55 @@ def client(rig):
         yield c
 
 
-def test_root(client):
-    assert client.get("/").json() == {"api": 1, "name": "sky-eye", "version": "0.1.0"}
+def test_api_root_json(client):
+    assert client.get("/api").json() == {"api": 1, "name": "sky-eye", "version": "0.1.0"}
+
+
+def make_dist(root: Path) -> Path:
+    dist = root / "dist dir"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text('<html><div id="root"></div></html>', encoding="utf-8")
+    (dist / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
+    return dist
+
+
+def test_root_serves_dashboard_index(tmp_path):
+    rig = make_rig(tmp_path / "data", dashboard_dir=make_dist(tmp_path))
+    try:
+        with TestClient(create_app(rig.ctx)) as c:
+            r = c.get("/")
+            assert r.status_code == 200
+            assert r.headers["content-type"].startswith("text/html")
+            assert r.headers["cache-control"] == "no-cache"
+            assert '<div id="root">' in r.text
+            assert c.get("/assets/app.js").status_code == 200
+            assert c.get("/api/info").json()["info"]["dashboard"] is True
+    finally:
+        rig.repo.close()
+
+
+def test_root_without_dashboard_explains_build(tmp_path):
+    rig = make_rig(tmp_path / "data", dashboard_dir=tmp_path / "nope")
+    try:
+        with TestClient(create_app(rig.ctx)) as c:
+            r = c.get("/")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["api"] == 1 and body["name"] == "sky-eye"
+            assert "npm run build" in body["dashboard"]
+            assert c.get("/assets/app.js").status_code == 404
+            assert c.get("/api/info").json()["info"]["dashboard"] is False
+    finally:
+        rig.repo.close()
+
+
+def test_info_shape(client):
+    body = client.get("/api/info").json()
+    assert body["api"] == 1
+    info = body["info"]
+    assert set(info) == {"version", "source", "detector", "auth", "dashboard"}
+    assert "/" not in info["source"]["name"] and "\\" not in info["source"]["name"]
+    assert info["dashboard"] is False
 
 
 def test_status_shape(client):
@@ -229,14 +295,16 @@ def test_token_mode(tmp_path, monkeypatch):
     try:
         with TestClient(create_app(rig.ctx)) as c:
             assert c.get("/").status_code == 200
+            assert c.get("/api").status_code == 401
+            assert c.get("/api", headers={"X-SkyEye-Token": "s3cret"}).status_code == 200
             assert c.get("/api/status").status_code == 401
             assert c.get("/api/status", headers={"X-SkyEye-Token": "nope"}).status_code == 401
             assert c.get("/api/status", headers={"X-SkyEye-Token": "s3cret"}).status_code == 200
             assert c.get("/api/status?token=s3cret").status_code == 200
             assert c.get("/media/x.jpg").status_code == 401
             with pytest.raises(WebSocketDisconnect) as exc:
-                with c.websocket_connect("/ws"):
-                    pass
+                with c.websocket_connect("/ws") as ws:  # accepted, then closed with 4401
+                    ws.receive_json()
             assert exc.value.code == 4401
             with c.websocket_connect("/ws?token=s3cret") as ws:
                 assert ws.receive_json()["type"] == "status"
@@ -315,3 +383,38 @@ def test_error_bodies_carry_api_version(client):
     assert body["detail"][0]["loc"][-1] == "limit"
     r = client.get("/media/2026-01-01/missing.jpg")
     assert r.status_code == 404 and r.json()["api"] == 1
+
+
+def test_token_mode_dashboard_shell_public(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKYEYE_API_TOKEN", "s3cret")
+    rig = make_rig(
+        tmp_path / "data", mode="token", token="s3cret", dashboard_dir=make_dist(tmp_path)
+    )
+    try:
+        with TestClient(create_app(rig.ctx)) as c:
+            assert c.get("/").status_code == 200
+            assert c.get("/assets/app.js").status_code == 200
+            assert c.get("/api/info").status_code == 401
+            r = c.get("/api/info", headers={"X-SkyEye-Token": "s3cret"})
+            assert r.status_code == 200 and r.json()["info"]["auth"] == "token"
+    finally:
+        rig.repo.close()
+
+
+def test_ws_unauthorized_close_code_seen_by_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKYEYE_API_TOKEN", "s3cret")
+    from websockets.exceptions import ConnectionClosed
+    from websockets.sync.client import connect
+
+    rig = make_rig(tmp_path / "data", mode="token", token="s3cret")
+    try:
+        with live_server(create_app(rig.ctx)) as base:
+            url = base.replace("http", "ws", 1) + "/ws"
+            with connect(url, open_timeout=5, close_timeout=5) as ws:  # accepted, then closed
+                with pytest.raises(ConnectionClosed):
+                    ws.recv(timeout=5)
+                assert ws.protocol.close_code == 4401
+            with connect(url + "?token=s3cret", open_timeout=5, close_timeout=5) as ws:
+                assert json.loads(ws.recv(timeout=5))["type"] == "status"
+    finally:
+        rig.repo.close()

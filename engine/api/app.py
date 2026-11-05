@@ -13,7 +13,7 @@ from typing import Annotated, Any
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -43,6 +43,8 @@ class EngineContext:
     data_dir: Path
     api: ApiConfig
     token: str | None = None
+    info: dict[str, Any] = field(default_factory=dict)  # served by GET /api/info
+    dashboard_dir: Path | None = None  # built website; None = nothing to serve
     # Set when the engine is shutting down (Ctrl+C): long-lived responses
     # (MJPEG stream, WebSocket) end so the HTTP server can stop.
     shutdown: threading.Event = field(default_factory=threading.Event)
@@ -83,9 +85,25 @@ def create_app(ctx: EngineContext) -> FastAPI:
             status_code=422,
         )
 
-    @app.get("/")
-    def root() -> dict[str, Any]:
-        return {"api": API_VERSION, "name": "sky-eye", "version": VERSION}
+    # Decided once at startup (no file watching): rebuild the site, restart the engine.
+    index = ctx.dashboard_dir / "index.html" if ctx.dashboard_dir else None
+    has_index = index is not None and index.is_file()
+    assets = ctx.dashboard_dir / "assets" if ctx.dashboard_dir else None
+    banner = {"api": API_VERSION, "name": "sky-eye", "version": VERSION}
+
+    @app.get("/api")
+    def api_root() -> dict[str, Any]:
+        return banner
+
+    @app.get("/api/info")
+    def info() -> dict[str, Any]:
+        return {"api": API_VERSION, "info": {**ctx.info, "dashboard": has_index}}
+
+    @app.get("/", response_model=None)
+    def root() -> Any:
+        if has_index:
+            return FileResponse(index, headers={"Cache-Control": "no-cache"})
+        return {**banner, "dashboard": "not built - run: cd dashboard && npm ci && npm run build"}
 
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
@@ -182,5 +200,7 @@ def create_app(ctx: EngineContext) -> FastAPI:
         finally:
             ctx.bus.unsubscribe(q)
 
+    if assets is not None and assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets), name="assets")
     app.mount("/media", StaticFiles(directory=media_dir(ctx.data_dir)), name="media")
     return app
