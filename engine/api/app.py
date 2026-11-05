@@ -11,9 +11,12 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.websockets import WebSocketDisconnect
 
 from engine.api.auth import TokenAuthMiddleware
@@ -63,6 +66,22 @@ def create_app(ctx: EngineContext) -> FastAPI:
     app = FastAPI(title="sky-eye", version=VERSION)
     if ctx.api.auth.mode == "token":
         app.add_middleware(TokenAuthMiddleware, token=ctx.token)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        return JSONResponse(
+            {"api": API_VERSION, "error": exc.detail},
+            status_code=exc.status_code,
+            headers=getattr(exc, "headers", None),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        return JSONResponse(
+            {"api": API_VERSION, "error": "invalid request",
+             "detail": jsonable_encoder(exc.errors())},
+            status_code=422,
+        )
 
     @app.get("/")
     def root() -> dict[str, Any]:

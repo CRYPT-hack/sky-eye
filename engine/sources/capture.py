@@ -53,5 +53,14 @@ class CaptureSource:
         return self._fps
 
     @property
+    def frame_size(self) -> tuple[int, int] | None:
+        """(width, height) reported by the opened source, or None if unknown."""
+        if self._cap is None:
+            return None
+        w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        return (w, h) if w > 0 and h > 0 else None
+
+    @property
     def ended(self) -> bool:
         return False

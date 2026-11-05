@@ -184,3 +184,17 @@ def test_retention_clears_db_clip_path_of_deleted_clip(tmp_path):
         assert any(m["truck"]["id"] == first.id and m["truck"]["clip_url"] is None for m in updates)
     finally:
         rig.close()
+
+
+def test_truck_created_logged(tmp_path, caplog):
+    rig = Rig(tmp_path)
+    try:
+        with caplog.at_level("INFO", logger="engine.events.manager"):
+            rig.feed(0, 0.0, result(0.8, track_id=7))
+        rec = rig.repo.list_trucks()[0]
+        assert any(
+            f"truck {rec.id} created" in r.getMessage() and "track 7" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        rig.close()

@@ -18,6 +18,28 @@ class DetectorError(Exception):
     pass
 
 
+def _weights_cache_dir() -> str:
+    try:
+        from rfdetr.assets.model_weights import get_model_cache_dir
+
+        return get_model_cache_dir()
+    except Exception:  # noqa: BLE001 - only used in an error message
+        return "~/.roboflow/models"
+
+
+def _build_error(size: str, input_size: int, weights: Path | None, exc: Exception) -> str:
+    text = str(exc)
+    if "resolution" in text.lower() or "divisible" in text.lower():
+        return f"could not build RF-DETR {size} (check detector.input_size={input_size}): {text}"
+    if weights is not None:
+        return f"could not load the RF-DETR {size} weights from detector.weights {weights}: {text}"
+    return (
+        f"could not load or download the RF-DETR {size} model weights: {text}. "
+        "The first run downloads them (internet access needed) into "
+        f"{_weights_cache_dir()}; a partial download there can be deleted to retry."
+    )
+
+
 def _model_class(size: str):
     import rfdetr
 
@@ -67,9 +89,7 @@ class RFDETRDetector:
             except DetectorError:
                 raise
             except Exception as exc:
-                raise DetectorError(
-                    f"could not build RF-DETR {size} (check detector.input_size={input_size}): {exc}"
-                ) from exc
+                raise DetectorError(_build_error(size, input_size, weights, exc)) from exc
             optimize = getattr(model, "optimize_for_inference", None)
             if optimize is not None:
                 try:

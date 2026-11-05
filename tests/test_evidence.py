@@ -284,3 +284,28 @@ def test_close_drop_pending(tmp_path, monkeypatch):
     rec.start_clip("pending", 1.9, tmp_path / "pending.mp4", done.append)
     rec.close(drop_pending=True)
     assert done == [] and calls == []
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        (500.0, 500.0, 600.0, 600.0),  # entirely right of / below the image
+        (-50.0, -50.0, -10.0, -10.0),  # entirely above / left of it
+        (100.0, 100.0, 100.0, 100.0),  # zero size
+        (319.6, 239.6, 400.0, 400.0),  # starts on the last pixel
+    ],
+)
+def test_snapshot_crop_clamped_to_at_least_one_pixel(tmp_path, box):
+    full, crop = tmp_path / "full.jpg", tmp_path / "crop.jpg"
+    save_snapshot(moving_frame(0), box, full, crop)
+    img = cv2.imdecode(np.fromfile(str(crop), dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert img is not None and img.shape[0] >= 1 and img.shape[1] >= 1
+
+
+def test_snapshot_in_non_ascii_dir(tmp_path):
+    folder = tmp_path / "трак 卡车"
+    full, crop = folder / "full.jpg", folder / "crop.jpg"
+    save_snapshot(moving_frame(0), (100, 100, 140, 120), full, crop)
+    img = cv2.imdecode(np.fromfile(str(full), dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert img is not None and img.shape[:2] == (240, 320)
+    assert crop.is_file()

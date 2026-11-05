@@ -8,6 +8,7 @@ from pathlib import Path
 _FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 _MAX_BYTES = 5 * 1024 * 1024
 _BACKUPS = 3
+_UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
 
 def setup_logging(data_dir: Path) -> Path:
@@ -30,4 +31,12 @@ def setup_logging(data_dir: Path) -> Path:
         handler.setFormatter(formatter)
         handler._sky_eye = True  # type: ignore[attr-defined]
         root.addHandler(handler)
+    # uvicorn runs with log_config=None; make sure its loggers (status, errors,
+    # access log) end up in the console and the rotating file like ours, even
+    # if something configured them before.
+    for name in _UVICORN_LOGGERS:
+        logger = logging.getLogger(name)
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+        logger.propagate = True
     return log_path

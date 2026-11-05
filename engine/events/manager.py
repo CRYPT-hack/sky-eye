@@ -144,6 +144,7 @@ class EventManager:
             truck_id, frame.ts, det.score, frame.wall_time, full_path, crop_path
         )
         self._total += 1
+        log.info("truck %d created (track %d, score %.2f)", truck_id, track_id, det.score)
         clip_path = folder / f"{stem}.mp4"
 
         def on_done(path: Path, truck_id: int = truck_id) -> None:

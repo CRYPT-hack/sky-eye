@@ -301,3 +301,17 @@ def test_ws_closes_on_shutdown(client, rig):
                 ws.receive_json()
     assert exc.value.code == 1001
 
+
+def test_error_bodies_carry_api_version(client):
+    r = client.get("/api/trucks/999")
+    assert r.status_code == 404
+    assert r.json() == {"api": 1, "error": "truck not found"}
+    r = client.get("/no/such/route")
+    assert r.status_code == 404 and r.json()["api"] == 1
+    r = client.get("/api/trucks?limit=0")
+    assert r.status_code == 422
+    body = r.json()
+    assert body["api"] == 1 and body["error"] == "invalid request"
+    assert body["detail"][0]["loc"][-1] == "limit"
+    r = client.get("/media/2026-01-01/missing.jpg")
+    assert r.status_code == 404 and r.json()["api"] == 1

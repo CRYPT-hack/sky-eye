@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import socket
 import sys
 import threading
@@ -30,7 +31,17 @@ log = logging.getLogger(__name__)
 _STOP_TIMEOUT_S = 5.0
 # Backstop: uvicorn cancels responses still open this long after an exit request.
 _GRACEFUL_SHUTDOWN_S = 3
+_INLINE_COMMENT = re.compile(r"\s+#.*$")
 _hard_exit = os._exit  # replaced in tests
+
+
+def _dotenv_value(raw: str) -> str:
+    """Unquote a .env value; drop a ` # comment` after an unquoted value."""
+    if raw[:1] in ("'", '"'):
+        end = raw.find(raw[0], 1)
+        if end != -1:
+            return raw[1:end]  # anything after the closing quote is a comment
+    return _INLINE_COMMENT.sub("", raw)
 
 
 def load_dotenv(path: Path) -> None:
@@ -46,11 +57,9 @@ def load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip()
+        key, value = key.strip(), _dotenv_value(value.strip())
         if not key:
             continue
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
         os.environ.setdefault(key, value)
 
 
@@ -58,6 +67,14 @@ def build_engine(cfg: AppConfig) -> EngineContext:
     """Build every component. The detector (slow model load) comes first; if
     anything after the source is opened fails, the source is closed again."""
     detector = build_detector(cfg.detector)
+    log.info(
+        "detector: RF-DETR %s, input %d px, device %s, confidence %.2f, classes %s",
+        cfg.detector.size,
+        cfg.detector.input_size,
+        cfg.detector.device,
+        cfg.detector.confidence,
+        ", ".join(cfg.detector.classes),
+    )
     data_dir = cfg.evidence.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     source = build_source(cfg.source)
@@ -71,12 +88,21 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             else:
                 where = f"source.device {cfg.source.device}"
             raise ConfigError(f"cannot open video source ({where}): {exc}") from exc
+        label = str(cfg.source.path) if cfg.source.type == "file" else f"capture:{cfg.source.device}"
+        size = getattr(source, "frame_size", None)
+        log.info(
+            "source: %s, %s @ %.2f fps, realtime %s",
+            label,
+            f"{size[0]}x{size[1]}" if size else "unknown size",
+            source.fps,
+            "on" if cfg.source.realtime else "off",
+        )
+        log.info("data dir: %s (media limit %.1f GB)", data_dir, cfg.evidence.max_disk_gb)
         tracker = build_tracker(cfg.tracker, source.fps)
         recorder = EvidenceRecorder(
             data_dir, cfg.evidence.clip_before_s, cfg.evidence.clip_after_s
         )
         repo = TruckRepository(data_dir / "sky-eye.db")
-        label = str(cfg.source.path) if cfg.source.type == "file" else f"capture:{cfg.source.device}"
         run_id = repo.create_run(label, cfg.model_dump_json())
         media_dir(data_dir)
         bus = EventBus()

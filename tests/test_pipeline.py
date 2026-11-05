@@ -419,3 +419,33 @@ def test_stop_with_clip_backlog_is_prompt(tmp_path, monkeypatch):
                 assert not list(media.rglob(stem))
     finally:
         rig.close()
+
+
+def test_repeated_frame_failures_are_summarised(tmp_path, caplog, monkeypatch):
+    import engine.pipeline as pipeline_mod
+
+    clock = [0.0]
+    monkeypatch.setattr(pipeline_mod, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def always_fails(i: int) -> list[Detection]:
+        clock[0] += 1.0  # every frame takes "1 s"
+        raise RuntimeError(f"boom {i}")
+
+    video = make_video(tmp_path / "v.mp4", 30)
+    rig = Rig(tmp_path, video, FakeDetector(always_fails))
+    try:
+        with caplog.at_level(logging.ERROR, logger="engine.pipeline"):
+            rig.pipeline.start()
+            assert rig.pipeline.wait(10) is True
+        errors = [r for r in caplog.records if r.name == "engine.pipeline"]
+        tracebacks = [r for r in errors if r.exc_info]
+        summaries = [r for r in errors if not r.exc_info]
+        assert len(tracebacks) == 1  # full traceback for the first failure only
+        assert "boom 0" in str(tracebacks[0].exc_info[1])
+        # 29 more failures over 29 s: one line per 10 s, plus the rest at the end
+        assert 2 <= len(summaries) <= 4
+        counts = [int(r.getMessage().split()[0]) for r in summaries]
+        assert sum(counts) == 29
+        assert rig.pipeline.status().frames_processed == 0
+    finally:
+        rig.close()

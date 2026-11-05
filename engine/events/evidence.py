@@ -124,22 +124,30 @@ def save_snapshot(
     full_path: Path,
     crop_path: Path,
 ) -> None:
-    """Save the full frame and a crop padded 15% per side (clamped), JPEG q90."""
-    params = [cv2.IMWRITE_JPEG_QUALITY, 90]
+    """Save the full frame and a crop padded 15% per side, JPEG q90.
+
+    The crop is clamped to the image and is at least 1x1 pixel, even for a
+    degenerate or off-image box. Files are written with Path.write_bytes, so
+    non-ASCII folders work on Windows (cv2.imwrite does not).
+    """
     image = frame.image
     h, w = image.shape[:2]
     x1, y1, x2, y2 = box
     pad_x, pad_y = 0.15 * (x2 - x1), 0.15 * (y2 - y1)
-    cx1 = max(0, int(round(x1 - pad_x)))
-    cy1 = max(0, int(round(y1 - pad_y)))
-    cx2 = min(w, int(round(x2 + pad_x)))
-    cy2 = min(h, int(round(y2 + pad_y)))
-    for p in (full_path, crop_path):
-        Path(p).parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(full_path), image, params):
-        raise OSError(f"failed to write {full_path}")
-    if not cv2.imwrite(str(crop_path), image[cy1:cy2, cx1:cx2], params):
-        raise OSError(f"failed to write {crop_path}")
+    cx1 = min(max(0, int(round(x1 - pad_x))), w - 1)
+    cy1 = min(max(0, int(round(y1 - pad_y))), h - 1)
+    cx2 = max(min(w, int(round(x2 + pad_x))), cx1 + 1)
+    cy2 = max(min(h, int(round(y2 + pad_y))), cy1 + 1)
+    _write_jpeg(Path(full_path), image)
+    _write_jpeg(Path(crop_path), image[cy1:cy2, cx1:cx2])
+
+
+def _write_jpeg(path: Path, image: np.ndarray) -> None:
+    ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        raise OSError(f"failed to encode {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(buf.tobytes())
 
 
 @dataclass

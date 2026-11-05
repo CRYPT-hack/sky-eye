@@ -120,3 +120,35 @@ def test_real_model_runs_on_cuda(capsys):
     if TRUCK_JPG.exists():
         img = cv2.imread(str(TRUCK_JPG))
         assert any(d.class_name == "truck" for d in detector.detect(img))
+
+
+def _build_raising(monkeypatch, exc):
+    import engine.detectors.rfdetr as rf
+
+    class Boom:
+        def __init__(self, **kwargs):
+            raise exc
+
+    monkeypatch.setattr(rf, "_model_class", lambda size: Boom)
+    monkeypatch.delenv("RF_HOME", raising=False)
+    monkeypatch.delenv("ROBOFLOW_HOME", raising=False)
+    return RFDETRDetector(
+        size="small", weights=None, input_size=500, confidence=0.4,
+        device="cpu", classes=["truck"],
+    )
+
+
+def test_resolution_error_blames_input_size(monkeypatch):
+    err = ValueError("resolution=500 is not divisible by patch_size (16) * num_windows (2) = 32.")
+    with pytest.raises(DetectorError) as exc:
+        _build_raising(monkeypatch, err)
+    assert "detector.input_size=500" in str(exc.value)
+
+
+def test_weights_download_error_mentions_cache_and_internet(monkeypatch):
+    with pytest.raises(DetectorError) as exc:
+        _build_raising(monkeypatch, ConnectionError("Failed to download rf-detr-small.pth"))
+    msg = str(exc.value)
+    assert "input_size" not in msg
+    assert "weights" in msg and ".roboflow" in msg and "internet" in msg
+    assert "Failed to download" in msg

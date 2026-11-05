@@ -299,3 +299,72 @@ def test_clean_stop_closes_repo():
     )
     app_mod.shutdown_engine(ctx)
     assert repo_closed == [1] and ctx.shutdown.is_set()
+
+
+def test_dotenv_inline_comments(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text(
+        "SKY_E=value # comment\n"
+        'SKY_F="quoted # kept"\n'
+        "SKY_G='single # kept'  # trailing comment\n"
+        "SKY_H=a#b\n"
+        "SKY_I=tab\t# comment\n",
+        encoding="utf-8",
+    )
+    for k in ("SKY_E", "SKY_F", "SKY_G", "SKY_H", "SKY_I"):
+        monkeypatch.delenv(k, raising=False)
+    load_dotenv(tmp_path / ".env")
+    assert os.environ["SKY_E"] == "value"
+    assert os.environ["SKY_F"] == "quoted # kept"
+    assert os.environ["SKY_G"] == "single # kept"
+    assert os.environ["SKY_H"] == "a#b"  # no space before #: part of the value
+    assert os.environ["SKY_I"] == "tab"
+    for k in ("SKY_E", "SKY_F", "SKY_G", "SKY_H", "SKY_I"):
+        monkeypatch.delenv(k)
+
+
+def test_startup_summary_logged(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    video = make_video(tmp_path / "v.mp4", 5)
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}"))
+    with caplog.at_level("INFO", logger="engine.app"):
+        ctx = build_engine(cfg)
+    try:
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "v.mp4" in text and "320x240" in text and "30.00 fps" in text
+        assert "RF-DETR small" in text and "device cpu" in text
+        assert str(cfg.evidence.data_dir) in text
+    finally:
+        ctx.pipeline.stop()
+        ctx.repo.close()
+
+
+def test_uvicorn_logs_reach_rotating_file(tmp_path):
+    import logging
+
+    from engine.logging_setup import setup_logging
+    from tests.test_api import make_rig
+
+    import uvicorn
+
+    from engine.api.app import create_app
+
+    rig = make_rig(tmp_path / "data")
+    # uvicorn's default log config (what 0.1.0 used) keeps its loggers to itself
+    uvicorn.Config(create_app(rig.ctx), log_level="info")
+    log_path = setup_logging(tmp_path / "data")
+    try:
+        app_mod.build_server(rig.ctx)  # configures uvicorn logging as main() does
+        logging.getLogger("uvicorn.error").info("uvicorn says hi")
+        logging.getLogger("uvicorn.access").info('127.0.0.1:1 - "GET /x HTTP/1.1" 200')
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        text = log_path.read_text(encoding="utf-8")
+        assert "uvicorn says hi" in text
+        assert '"GET /x HTTP/1.1" 200' in text
+    finally:
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            if getattr(handler, "_sky_eye", False):
+                root.removeHandler(handler)
+                handler.close()
+        rig.repo.close()
