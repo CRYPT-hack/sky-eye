@@ -117,3 +117,74 @@ def test_load_dotenv_does_not_override(tmp_path, monkeypatch):
 
 def test_load_dotenv_missing_file_is_noop(tmp_path):
     load_dotenv(tmp_path / ".env")
+
+
+def test_unopenable_video_exit_code_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    bad = tmp_path / "bad.mp4"
+    bad.write_text("not a video", encoding="utf-8")
+    cfg = write_config(tmp_path, source=f"  path: {bad.as_posix()}")
+    assert main(["--config", str(cfg)]) == 2
+    err = capsys.readouterr().err
+    assert "source.path" in err and "bad.mp4" in err
+    assert "Traceback" not in err
+
+
+def test_failed_open_still_closes_source(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    video = make_video(tmp_path / "v.mp4", 5)
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}"))
+    closed = []
+
+    class Src:
+        def open(self):
+            raise RuntimeError("half open")
+
+        def close(self):
+            closed.append(1)
+
+    monkeypatch.setattr(app_mod, "build_source", lambda scfg: Src())
+    with pytest.raises(app_mod.ConfigError):
+        build_engine(cfg)
+    assert closed
+
+
+def test_build_engine_failure_closes_repo(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    video = make_video(tmp_path / "v.mp4", 5)
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}"))
+    repos = []
+    real = app_mod.TruckRepository
+
+    def spy(path):
+        r = real(path)
+        orig = r.close
+        r.close = lambda: (repos.append(1), orig())[1]
+        return r
+
+    monkeypatch.setattr(app_mod, "TruckRepository", spy)
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(app_mod, "EventManager", boom)
+    with pytest.raises(RuntimeError):
+        build_engine(cfg)
+    assert repos
+
+
+def test_dotenv_bom_and_crlf(tmp_path, monkeypatch):
+    monkeypatch.delenv("SKYEYE_API_TOKEN", raising=False)
+    (tmp_path / ".env").write_bytes(b"\xef\xbb\xbfSKYEYE_API_TOKEN=secret\r\nOTHER=1\r\n")
+    load_dotenv(tmp_path / ".env")
+    assert os.environ["SKYEYE_API_TOKEN"] == "secret"
+    monkeypatch.delenv("SKYEYE_API_TOKEN")
+    monkeypatch.delenv("OTHER", raising=False)
+
+
+def test_undecodable_dotenv_exit_code_2(tmp_path, capsys):
+    cfg = write_config(tmp_path)
+    (tmp_path / ".env").write_bytes(b"\xff\xfe\x00bad\x80\x81")
+    assert main(["--config", str(cfg), "--check"]) == 2
+    err = capsys.readouterr().err
+    assert ".env" in err and "Traceback" not in err

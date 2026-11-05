@@ -31,9 +31,11 @@ _STOP_TIMEOUT_S = 5.0
 def load_dotenv(path: Path) -> None:
     """Load KEY=VALUE lines into os.environ without overriding existing variables."""
     try:
-        text = Path(path).read_text(encoding="utf-8")
-    except OSError:
+        text = Path(path).read_text(encoding="utf-8-sig")  # tolerate a BOM
+    except FileNotFoundError:
         return
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -54,9 +56,16 @@ def build_engine(cfg: AppConfig) -> EngineContext:
     data_dir = cfg.evidence.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     source = build_source(cfg.source)
-    source.open()
     repo: TruckRepository | None = None
     try:
+        try:
+            source.open()
+        except (RuntimeError, OSError) as exc:
+            if cfg.source.type == "file":
+                where = f"source.path {cfg.source.path}"
+            else:
+                where = f"source.device {cfg.source.device}"
+            raise ConfigError(f"cannot open video source ({where}): {exc}") from exc
         tracker = build_tracker(cfg.tracker, source.fps)
         recorder = EvidenceRecorder(
             data_dir, cfg.evidence.clip_before_s, cfg.evidence.clip_after_s
@@ -138,8 +147,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config_path = args.config
-    load_dotenv(config_path.resolve().parent / ".env")
     try:
+        load_dotenv(config_path.resolve().parent / ".env")
         cfg = load_config(config_path)
         if args.check:
             build_detector(cfg.detector)
