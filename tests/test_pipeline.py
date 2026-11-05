@@ -376,3 +376,46 @@ def test_annotate_draws_without_mutating_frame():
     assert out.any()  # box and label were drawn
     assert not image.any()  # the frame (shared with the evidence buffer) is untouched
     assert np.array_equal(annotate(frame, []), image)
+
+
+def test_stop_with_clip_backlog_is_prompt(tmp_path, monkeypatch):
+    import threading
+
+    import engine.events.evidence as evidence_mod
+
+    started = threading.Event()
+
+    def slow_write(frames, path, fps):
+        started.set()
+        time.sleep(0.5)
+        path.write_bytes(b"clip")
+
+    monkeypatch.setattr(evidence_mod, "write_clip", slow_write)
+    boxes = [(x, 0.0, x + 40.0, 30.0) for x in (0.0, 60.0, 120.0, 180.0, 240.0)]
+    boxes.append((0.0, 120.0, 40.0, 150.0))
+    video = make_video(tmp_path / "v.mp4", 300)  # 10 s at realtime pace
+    rig = Rig(
+        tmp_path,
+        video,
+        FakeDetector(lambda i: [truck(b) for b in boxes]),
+        realtime=True,
+        after_s=0.2,
+    )
+    try:
+        rig.pipeline.start()
+        assert wait_until(lambda: rig.pipeline.status().trucks_total == 6, 5.0)
+        assert started.wait(5.0)
+        t0 = time.monotonic()
+        rig.pipeline.stop()  # a full flush would encode 6 x 0.5 s
+        assert time.monotonic() - t0 < 1.5
+        recs = rig.repo.list_trucks()
+        assert len(recs) == 6
+        media = rig.data_dir / "media"
+        with_clip = [r for r in recs if r.clip_path is not None]
+        assert 1 <= len(with_clip) < 6  # the running encode finished, the rest dropped
+        for r in recs:
+            stem = f"{r.run_id}_{r.track_id}.mp4"
+            if r.clip_path is None:
+                assert not list(media.rglob(stem))
+    finally:
+        rig.close()

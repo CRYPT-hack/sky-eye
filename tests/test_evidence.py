@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import av
 import cv2
@@ -141,3 +142,145 @@ def test_large_frames_downscaled_to_1280(tmp_path):
 def test_2997fps_keeps_every_frame(tmp_path):
     n, _, _, _ = _run(tmp_path, 60, 29.97)
     assert n == 60
+
+
+# ----- bounded clip jobs, atomic writes, fast stop -----
+
+import logging  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+import pytest  # noqa: E402
+
+import engine.events.evidence as evidence_mod  # noqa: E402
+from engine.events.evidence import write_clip  # noqa: E402
+
+
+class GatedWriter:
+    """Stand-in for write_clip: blocks every encode until release() is called."""
+
+    def __init__(self) -> None:
+        self.started: list = []
+        self.started_evt = threading.Event()
+        self._gate = threading.Event()
+
+    def __call__(self, frames, path, fps) -> None:
+        self.started.append(path)
+        self.started_evt.set()
+        assert self._gate.wait(10), "gate never released"
+        path.write_bytes(b"clip")
+
+    def release(self) -> None:
+        self._gate.set()
+
+
+def _fill(rec: EvidenceRecorder, n: int) -> None:
+    for i in range(n):
+        rec.push(moving_frame(i))
+
+
+def test_clip_job_cap_skips_seventh(tmp_path, monkeypatch, caplog):
+    writer = GatedWriter()
+    monkeypatch.setattr(evidence_mod, "write_clip", writer)
+    rec = EvidenceRecorder(tmp_path, before_s=0.5, after_s=0.5)  # default cap: 6
+    done: list = []
+    _fill(rec, 60)  # ring holds ts 0..1.97
+    try:
+        for k in range(3):  # complete in the ring: queued (one of them running)
+            rec.start_clip(f"q{k}", 0.2, tmp_path / f"q{k}.mp4", done.append)
+        assert writer.started_evt.wait(5)
+        for k in range(3):  # end in the future: pending
+            rec.start_clip(f"p{k}", 1.9, tmp_path / f"p{k}.mp4", done.append)
+        with caplog.at_level(logging.WARNING, logger="engine.events.evidence"):
+            rec.start_clip("seventh", 1.9, tmp_path / "seventh.mp4", done.append)
+        assert any("seventh" in r.getMessage() for r in caplog.records)
+    finally:
+        writer.release()
+        rec.close()
+    assert len(done) == 6
+    assert tmp_path / "seventh.mp4" not in done
+    assert not (tmp_path / "seventh.mp4").exists()
+
+
+def test_cap_frees_up_after_jobs_finish(tmp_path):
+    rec = EvidenceRecorder(tmp_path, before_s=0.2, after_s=0.2, max_jobs=1)
+    done: list = []
+    _fill(rec, 30)
+    rec.start_clip("a", 0.3, tmp_path / "a.mp4", done.append)
+    rec.flush()
+    rec.start_clip("b", 0.3, tmp_path / "b.mp4", done.append)
+    rec.close()
+    assert done == [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+
+
+def test_x264_threads_capped(tmp_path):
+    if pick_h264_encoder() != "libx264":
+        pytest.skip("thread cap only applies to libx264")
+    path = tmp_path / "t.mp4"
+    write_clip([moving_frame(i, size=(640, 480)) for i in range(10)], path, FPS)
+    assert b"threads=2" in path.read_bytes()  # x264 records its settings in the stream
+
+
+def test_clip_written_via_temp_file(tmp_path, monkeypatch):
+    seen: list = []
+    real = evidence_mod._encode
+
+    def spy(encoder, images, path, fps):
+        seen.append(path)
+        real(encoder, images, path, fps)
+
+    monkeypatch.setattr(evidence_mod, "_encode", spy)
+    path = tmp_path / "c.mp4"
+    write_clip([moving_frame(i) for i in range(5)], path, FPS)
+    assert seen and seen[0] != path and seen[0].parent == path.parent
+    assert path.is_file()
+    assert not seen[0].exists()
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_failed_encode_leaves_no_files(tmp_path, monkeypatch):
+    def broken(encoder, images, path, fps):
+        Path(path).write_bytes(b"half a clip")
+        raise RuntimeError("encoder died")
+
+    monkeypatch.setattr(evidence_mod, "_encode", broken)
+    rec = EvidenceRecorder(tmp_path, before_s=0.2, after_s=0.2)
+    done: list = []
+    _fill(rec, 30)
+    rec.start_clip("k", 0.3, tmp_path / "media" / "k.mp4", done.append)
+    rec.close()
+    assert done == []
+    assert list((tmp_path / "media").iterdir()) == []  # no .mp4 and no temp file
+
+
+def test_abort_drops_unstarted_jobs(tmp_path, monkeypatch):
+    writer = GatedWriter()
+    monkeypatch.setattr(evidence_mod, "write_clip", writer)
+    rec = EvidenceRecorder(tmp_path, before_s=0.5, after_s=0.5)
+    done: list = []
+    _fill(rec, 60)
+    rec.start_clip("running", 0.2, tmp_path / "running.mp4", done.append)
+    assert writer.started_evt.wait(5)
+    for k in range(3):
+        rec.start_clip(f"queued{k}", 0.2, tmp_path / f"queued{k}.mp4", done.append)
+    rec.start_clip("pending", 1.9, tmp_path / "pending.mp4", done.append)
+    rec.abort()
+    rec.start_clip("late", 1.9, tmp_path / "late.mp4", done.append)  # after abort: skipped
+    writer.release()
+    t0 = time.monotonic()
+    rec.close()
+    assert time.monotonic() - t0 < 1.0
+    assert done == [tmp_path / "running.mp4"]  # the started encode still completes
+    assert writer.started == [tmp_path / "running.mp4"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["running.mp4"]
+
+
+def test_close_drop_pending(tmp_path, monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(evidence_mod, "write_clip", lambda f, p, fps: calls.append(p))
+    rec = EvidenceRecorder(tmp_path, before_s=0.5, after_s=0.5)
+    done: list = []
+    _fill(rec, 60)
+    rec.start_clip("pending", 1.9, tmp_path / "pending.mp4", done.append)
+    rec.close(drop_pending=True)
+    assert done == [] and calls == []

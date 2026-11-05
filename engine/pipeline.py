@@ -167,12 +167,17 @@ class Pipeline:
             self._infer_thread.start()
 
     def stop(self) -> None:
-        """Stop both threads and wait for them; harmless if already finished."""
+        """Stop both threads and wait for them; harmless if already finished.
+
+        Clips that have not started encoding are dropped (fast stop); the end
+        of a file source instead finishes every clip.
+        """
         with self._lifecycle:
             never_started = not self._started
             self._started = True  # a stopped pipeline cannot be started
         self._stop_event.set()
         self._channel.cancel()
+        self._recorder.abort()
         if never_started:
             self._close_source()
             self._finish()
