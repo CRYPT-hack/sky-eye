@@ -76,7 +76,7 @@ sky-eye/
 │  ├─ sources/               VideoSource: file · capture (webcam/HDMI) · stream · go2rtc
 │  ├─ detectors/             Detector: rfdetr (default) · yolo (optional) · onnx
 │  │   └─ sahi.py            tiling wrapper, works on any Detector
-│  ├─ tracking/              Tracker: ByteTrack (via supervision)
+│  ├─ tracking/              Tracker: ByteTrack (via Roboflow `trackers`)
 │  ├─ telemetry/             Telemetry: mavlink · dji_srt · none
 │  ├─ geo/                   Geolocator: pixel + drone pose → lat/lon
 │  ├─ events/                EventManager + Evidence (snapshot, clip ring buffer)
@@ -195,7 +195,7 @@ Each block is created from config by a small factory (`build_source(cfg)`, `buil
 
 ### 5.3 Tracker
 
-ByteTrack via `supervision` (MIT). A track becomes a **confirmed truck** after it appears in ≥3 of the last 5 processed frames, which filters one-frame false alarms. Lost tracks are kept for 2 s so short occlusions (bridges, trees) don't create a new ID.
+ByteTrack via Roboflow's `trackers` package (Apache-2.0; supervision 0.31 no longer ships a tracker), fed each frame's capture timestamp so dropped frames in realtime mode do not split a track. A track becomes a **confirmed truck** after it appears in ≥3 of the last 5 processed frames, which filters one-frame false alarms. Lost tracks are kept for 2 s so short occlusions (bridges, trees) don't create a new ID.
 
 ### 5.4 Telemetry and geolocation
 
@@ -326,9 +326,10 @@ Logs: structured logs to console + rotating file `data/logs/`.
 | Language / env | Python **3.12** via `uv` (system has 3.14; 3.12 is pinned for PyTorch/CUDA compatibility) | — |
 | Deep learning | PyTorch (CUDA) | BSD |
 | Detector | RF-DETR | Apache-2.0 |
-| Tracking, drawing | supervision (ByteTrack) | MIT |
+| Tracking | Roboflow `trackers` (ByteTrack) | Apache-2.0 |
+| Drawing, detection types | supervision | MIT |
 | Small objects | SAHI | MIT |
-| Video | OpenCV, PyAV (FFmpeg) | Apache-2.0 / BSD (FFmpeg LGPL) |
+| Video | OpenCV, PyAV (FFmpeg) | Apache-2.0 / BSD (FFmpeg LGPL; see note) |
 | Inference speed-up | ONNX Runtime, TensorRT (optional) | MIT / NVIDIA |
 | Web server | FastAPI + uvicorn | MIT / BSD |
 | Database | SQLite via Python's built-in `sqlite3` | Public domain |
@@ -339,6 +340,8 @@ Logs: structured logs to console + rotating file `data/logs/`.
 | Optional | Ultralytics YOLO | **AGPL-3.0**, opt-in extra only |
 
 Exact versions are pinned in the implementation plan after checking the latest releases.
+
+**Note on x264:** the PyAV wheel bundles an FFmpeg built with libx264, which is **GPL-2.0+**; the clips are encoded with it. That is fine for running sky-eye from source; it matters only if we ever redistribute a bundled binary (e.g. a PyInstaller build or an installer), which would then have to meet the GPL, or switch to an LGPL-only FFmpeg and another H.264 encoder (the engine already falls back to `h264_nvenc`, `libopenh264` or `h264_mf`).
 
 ---
 
