@@ -122,3 +122,30 @@ test("stops the connection on unmount", async () => {
   unmount();
   expect(fake.stops[0]).toHaveBeenCalled();
 });
+
+test("backfills after reconnecting to open, without new-truck alerts", async () => {
+  const client = makeClient([makeTruck(1)]);
+  const fake = makeConnect();
+  const onNewTruck = vi.fn();
+  const { result } = renderHook(() => useLive(client, { connect: fake.connect, onNewTruck }), {
+    wrapper: wrap(client),
+  });
+  await waitFor(() => expect(result.current.trucks).toHaveLength(1));
+  expect(client.listTrucks).toHaveBeenCalledTimes(1);
+
+  act(() => fake.state("open"));
+  expect(client.listTrucks).toHaveBeenCalledTimes(1);
+  act(() => fake.state("reconnecting"));
+  (client.listTrucks as ReturnType<typeof vi.fn>).mockResolvedValue({
+    trucks: [makeTruck(2), makeTruck(1, { best_score: 0.1 })],
+    limit: 20,
+    offset: 0,
+  });
+  act(() => fake.state("open"));
+
+  await waitFor(() => expect(result.current.trucks.map((t) => t.id)).toEqual([2, 1]));
+  expect(client.listTrucks).toHaveBeenCalledTimes(2);
+  expect(client.getStatus).toHaveBeenCalledTimes(2);
+  expect(onNewTruck).not.toHaveBeenCalled();
+  expect(result.current.trucks[1].best_score).toBe(0.8); // existing copy wins
+});

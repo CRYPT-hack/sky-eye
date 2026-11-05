@@ -52,17 +52,21 @@ export function useLive(client: ApiClient, opts: UseLiveOptions = {}): LiveData 
       setTrucks(trucksRef.current);
     };
 
-    // Messages that arrive before the first fetch finishes win over the fetched copy.
-    Promise.all([client.listTrucks({ limit: keep }), client.getStatus()])
-      .then(([list, st]) => {
-        if (cancelled) return;
-        const known = new Set(trucksRef.current.map((t) => t.id));
-        apply(list.trucks.filter((t) => !known.has(t.id)));
-        setStatus((cur) => cur ?? st);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled && e instanceof ApiError && e.status === 401) reportRef.current();
-      });
+    // Messages that arrive before a fetch finishes win over the fetched copy.
+    const fill = (replaceStatus: boolean) => {
+      Promise.all([client.listTrucks({ limit: keep }), client.getStatus()])
+        .then(([list, st]) => {
+          if (cancelled) return;
+          const known = new Set(trucksRef.current.map((t) => t.id));
+          apply(list.trucks.filter((t) => !known.has(t.id)));
+          setStatus((cur) => (replaceStatus ? st : (cur ?? st)));
+        })
+        .catch((e: unknown) => {
+          if (!cancelled && e instanceof ApiError && e.status === 401) reportRef.current();
+        });
+    };
+    fill(false);
+    let prev: LiveState = "connecting";
 
     const stop = connect({
       url: () => client.liveUrl(),
@@ -81,6 +85,9 @@ export function useLive(client: ApiClient, opts: UseLiveOptions = {}): LiveData 
       onState: (s) => {
         if (cancelled) return;
         setState(s);
+        // Back after a gap: backfill what was missed (quietly, no new-truck alerts).
+        if (prev === "reconnecting" && s === "open") fill(true);
+        prev = s;
         if (s === "unauthorized") reportRef.current();
       },
     });

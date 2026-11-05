@@ -18,24 +18,41 @@ export function saveSoundEnabled(on: boolean): void {
 
 let ctx: AudioContext | null = null;
 
+function getContext(): AudioContext | null {
+  if (ctx) return ctx;
+  const Ctor: typeof AudioContext | undefined =
+    window.AudioContext ??
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!Ctor) return null;
+  ctx = new Ctor();
+  return ctx;
+}
+
+/** Create or resume the audio context. Call from a user gesture (Safari/iOS need that). */
+export function unlockAudio(): void {
+  try {
+    const c = getContext();
+    if (c && c.state === "suspended") void c.resume();
+  } catch {
+    // no audio available
+  }
+}
+
 /** A short 880 Hz beep (150 ms). Does nothing where Web Audio is unavailable or blocked. */
 export function beep(): void {
   try {
-    const Ctor: typeof AudioContext | undefined =
-      window.AudioContext ??
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!Ctor) return;
-    ctx ??= new Ctor();
-    if (ctx.state === "suspended") void ctx.resume();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
+    const c = getContext();
+    if (!c) return;
+    if (c.state === "suspended") void c.resume();
+    const osc = c.createOscillator();
+    const gain = c.createGain();
     osc.type = "sine";
     osc.frequency.value = 880;
     gain.gain.value = 0.15;
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(c.destination);
     osc.start();
-    osc.stop(ctx.currentTime + 0.15);
+    osc.stop(c.currentTime + 0.15);
   } catch {
     // no audio: stay silent
   }

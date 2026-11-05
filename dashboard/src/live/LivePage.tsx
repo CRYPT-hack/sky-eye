@@ -1,10 +1,10 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "../apiContext";
 import type { connectLive } from "../api/live";
 import type { Truck } from "../api/types";
 import Banner from "../components/Banner";
 import TruckCard from "../components/TruckCard";
-import { beep, loadSoundEnabled, saveSoundEnabled } from "./sound";
+import { beep, loadSoundEnabled, saveSoundEnabled, unlockAudio } from "./sound";
 import StreamView from "./StreamView";
 import { useLive } from "./useLive";
 
@@ -29,8 +29,27 @@ export default function LivePage({ connect }: { connect?: typeof connectLive }) 
 
   const { status, trucks, state } = useLive(client, { connect, onNewTruck });
 
+  // Sound was left on from an earlier visit: browsers only allow audio after a gesture,
+  // so unlock on the first interaction with the page.
+  useEffect(() => {
+    if (!loadSoundEnabled()) return;
+    const events = ["pointerdown", "keydown"] as const;
+    const unlock = () => {
+      unlockAudio();
+      for (const e of events) window.removeEventListener(e, unlock);
+    };
+    for (const e of events) window.addEventListener(e, unlock);
+    return () => {
+      for (const e of events) window.removeEventListener(e, unlock);
+    };
+  }, []);
+
   function toggleSound() {
     const next = !soundOn;
+    if (next) {
+      unlockAudio();
+      beep(); // confirmation, and proof the speakers work
+    }
     setSoundOn(next);
     saveSoundEnabled(next);
   }

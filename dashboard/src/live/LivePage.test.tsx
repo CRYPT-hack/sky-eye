@@ -6,10 +6,16 @@ import { makeClient, makeConnect, makeTruck, STATUS } from "./fakes";
 import LivePage from "./LivePage";
 
 const beepMock = vi.hoisted(() => vi.fn());
-vi.mock("./sound", async (orig) => ({ ...(await orig<typeof import("./sound")>()), beep: beepMock }));
+const unlockMock = vi.hoisted(() => vi.fn());
+vi.mock("./sound", async (orig) => ({
+  ...(await orig<typeof import("./sound")>()),
+  beep: beepMock,
+  unlockAudio: unlockMock,
+}));
 
 beforeEach(() => {
   beepMock.mockClear();
+  unlockMock.mockClear();
   window.localStorage.clear();
 });
 
@@ -94,6 +100,9 @@ test("beeps on truck.new only when sound is on", async () => {
   await user.click(toggle);
   expect(toggle).toHaveAttribute("aria-pressed", "true");
   expect(window.localStorage.getItem("skyeye.sound")).toBe("1");
+  expect(unlockMock).toHaveBeenCalledTimes(1);
+  expect(beepMock).toHaveBeenCalledTimes(1); // confirmation beep
+  beepMock.mockClear();
 
   act(() => fake.send({ type: "truck.new", truck: makeTruck(3) }));
   expect(beepMock).toHaveBeenCalledTimes(1);
@@ -106,4 +115,21 @@ test("stream error shows the retry message", async () => {
   await setup();
   fireEvent.error(screen.getByAltText("Live drone video with truck boxes"));
   expect(screen.getByText("Video stream unavailable — retrying")).toBeInTheDocument();
+});
+
+test("sound already on at load: first user interaction unlocks audio once", async () => {
+  window.localStorage.setItem("skyeye.sound", "1");
+  await setup();
+  expect(unlockMock).not.toHaveBeenCalled();
+  fireEvent.pointerDown(window);
+  expect(unlockMock).toHaveBeenCalledTimes(1);
+  fireEvent.keyDown(window, { key: "a" });
+  fireEvent.pointerDown(window);
+  expect(unlockMock).toHaveBeenCalledTimes(1);
+});
+
+test("sound off at load: no unlock listener", async () => {
+  await setup();
+  fireEvent.pointerDown(window);
+  expect(unlockMock).not.toHaveBeenCalled();
 });
