@@ -1,0 +1,36 @@
+# sky-eye example config. Relative paths resolve against this file's folder.
+source:
+  type: file            # file | capture
+  path: samples/drone.mp4
+  device: 0             # capture device index
+  realtime: true
+  loop: false
+
+detector:
+  type: rfdetr
+  size: small           # nano | small | medium
+  weights: null         # null = COCO-pretrained
+  input_size: 512
+  confidence: 0.4
+  device: cuda          # cuda | cpu
+  classes: [truck]
+
+tracker:
+  confirm_hits: 3
+  confirm_window: 5
+  lost_timeout_s: 2.0
+
+evidence:
+  data_dir: data
+  clip_before_s: 3
+  clip_after_s: 5
+  snapshot_window_s: 2
+  max_disk_gb: 20
+
+api:
+  host: 0.0.0.0
+  port: 8000
+  auth:
+    mode: none          # none | token (token needs SKYEYE_API_TOKEN in .env/env)
+  stream_fps: 15
+  stream_max_width: 1280
