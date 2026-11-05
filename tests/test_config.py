@@ -84,3 +84,64 @@ def test_example_config_loads(tmp_path):
     cfg = load_config(tmp_path / "config.yaml")
     assert cfg.detector.classes == ["truck"]
     assert cfg.source.path == tmp_path / "samples" / "drone.mp4"
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("tracker", "confirm_hits", 0),
+        ("tracker", "confirm_window", 0),
+        ("tracker", "lost_timeout_s", 0),
+        ("tracker", "lost_timeout_s", -1),
+        ("evidence", "clip_before_s", -0.5),
+        ("evidence", "clip_after_s", 0),
+        ("evidence", "snapshot_window_s", -1),
+        ("evidence", "max_disk_gb", 0),
+        ("api", "port", 0),
+        ("api", "port", 65536),
+        ("api", "stream_fps", 0),
+        ("api", "stream_max_width", 15),
+        ("source", "device", -1),
+    ],
+)
+def test_out_of_range_value_refused(tmp_path, section, key, value):
+    p = _write(tmp_path, f"{section}:\n  {key}: {value}\n")
+    with pytest.raises(ConfigError, match=rf"{section}\.{key}"):
+        load_config(p)
+
+
+def test_boundary_values_accepted(tmp_path):
+    cfg = load_config(
+        _write(
+            tmp_path,
+            "tracker:\n  confirm_hits: 1\n  confirm_window: 1\n"
+            "evidence:\n  clip_before_s: 0\n  snapshot_window_s: 0\n"
+            "api:\n  port: 65535\n  stream_fps: 1\n  stream_max_width: 16\n"
+            "source:\n  device: 0\n",
+        )
+    )
+    assert cfg.api.port == 65535 and cfg.tracker.confirm_hits == 1
+
+
+def test_undecodable_config_names_path(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_bytes(b"detector:\n  size: \xff\xfe\x80\n")
+    with pytest.raises(ConfigError, match="c.yaml"):
+        load_config(p)
+
+
+def test_unreadable_config_names_path(tmp_path, monkeypatch):
+    p = _write(tmp_path, "{}")
+
+    def deny(self, *a, **k):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    with pytest.raises(ConfigError, match="c.yaml"):
+        load_config(p)
+
+
+def test_config_with_bom_loads(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_bytes(b"\xef\xbb\xbfdetector:\n  size: nano\n")
+    assert load_config(p).detector.size == "nano"
