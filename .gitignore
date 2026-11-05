@@ -8,3 +8,4 @@ samples/
 *.onnx
 dashboard/node_modules/
 dashboard/dist/
+config.yaml

@@ -1,0 +1,171 @@
+"""Wires the engine together and runs it: `python -m engine --config config.yaml`."""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import socket
+import sys
+import threading
+from pathlib import Path
+
+import uvicorn
+
+from engine.api.app import EngineContext, create_app
+from engine.config import AppConfig, ConfigError, load_config
+from engine.detectors.rfdetr import DetectorError, build_detector
+from engine.events.bus import EventBus
+from engine.events.evidence import EvidenceRecorder
+from engine.events.manager import EventManager
+from engine.logging_setup import setup_logging
+from engine.pipeline import Pipeline, RuntimeSettings
+from engine.sources import build_source
+from engine.storage import TruckRepository, media_dir
+from engine.tracking import build_tracker
+
+log = logging.getLogger(__name__)
+
+_STOP_TIMEOUT_S = 5.0
+
+
+def load_dotenv(path: Path) -> None:
+    """Load KEY=VALUE lines into os.environ without overriding existing variables."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not key:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def build_engine(cfg: AppConfig) -> EngineContext:
+    """Build every component. The detector (slow model load) comes first; if
+    anything after the source is opened fails, the source is closed again."""
+    detector = build_detector(cfg.detector)
+    data_dir = cfg.evidence.data_dir
+    data_dir.mkdir(parents=True, exist_ok=True)
+    source = build_source(cfg.source)
+    source.open()
+    repo: TruckRepository | None = None
+    try:
+        tracker = build_tracker(cfg.tracker, source.fps)
+        recorder = EvidenceRecorder(
+            data_dir, cfg.evidence.clip_before_s, cfg.evidence.clip_after_s
+        )
+        repo = TruckRepository(data_dir / "sky-eye.db")
+        label = str(cfg.source.path) if cfg.source.type == "file" else f"capture:{cfg.source.device}"
+        run_id = repo.create_run(label, cfg.model_dump_json())
+        media_dir(data_dir)
+        bus = EventBus()
+        manager = EventManager(
+            repo,
+            recorder,
+            bus,
+            run_id,
+            data_dir,
+            cfg.evidence.snapshot_window_s,
+            int(cfg.evidence.max_disk_gb * 1024**3),
+        )
+        runtime = RuntimeSettings(confidence=cfg.detector.confidence)
+        pipeline = Pipeline(
+            source,
+            detector,
+            tracker,
+            manager,
+            recorder,
+            runtime,
+            realtime=cfg.source.realtime,
+            stream_max_width=cfg.api.stream_max_width,
+        )
+    except BaseException:
+        try:
+            source.close()
+        finally:
+            if repo is not None:
+                repo.close()
+        raise
+    return EngineContext(
+        pipeline=pipeline,
+        repo=repo,
+        bus=bus,
+        runtime=runtime,
+        data_dir=data_dir,
+        api=cfg.api,
+        token=os.environ.get("SKYEYE_API_TOKEN"),
+    )
+
+
+def _lan_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))  # UDP: no packet is sent
+            return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
+def _fail(message: str) -> int:
+    print(" ".join(str(message).split()), file=sys.stderr)
+    return 2
+
+
+def _stop_pipeline(ctx: EngineContext) -> bool:
+    """Stop the pipeline in a helper thread; give up after 5 s. True if it stopped."""
+    stopper = threading.Thread(target=ctx.pipeline.stop, name="sky-eye-stop", daemon=True)
+    stopper.start()
+    stopper.join(_STOP_TIMEOUT_S)
+    if stopper.is_alive():
+        log.warning("pipeline did not stop within %.0f s; exiting anyway", _STOP_TIMEOUT_S)
+        return False
+    return True
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m engine", description="sky-eye engine")
+    parser.add_argument("--config", required=True, type=Path, help="path to config.yaml")
+    parser.add_argument(
+        "--check", action="store_true", help="validate the config and load the detector, then exit"
+    )
+    args = parser.parse_args(argv)
+
+    config_path = args.config
+    load_dotenv(config_path.resolve().parent / ".env")
+    try:
+        cfg = load_config(config_path)
+        if args.check:
+            build_detector(cfg.detector)
+            print("OK")
+            return 0
+        setup_logging(cfg.evidence.data_dir)
+        ctx = build_engine(cfg)
+    except (ConfigError, DetectorError) as exc:
+        return _fail(f"error: {exc}")
+
+    app = create_app(ctx)
+    server = uvicorn.Server(
+        uvicorn.Config(app, host=cfg.api.host, port=cfg.api.port, log_level="info")
+    )
+    clean = True
+    try:
+        ctx.pipeline.start()
+        print(f"Dashboard: http://{_lan_ip()}:{cfg.api.port}/", flush=True)
+        server.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        clean = _stop_pipeline(ctx)
+        if clean:
+            ctx.repo.close()
+    if not clean:
+        logging.shutdown()
+        os._exit(0)
+    return 0
