@@ -213,7 +213,7 @@ def test_video_path_with_spaces(tmp_path):      # file under tmp_path / "auto de
 - Consumes: `Detection`, `DetectorConfig`.
 - Produces:
   - `RFDETRDetector(size: str, weights: Path | None, input_size: int, confidence: float, device: str, classes: list[str])` with `detect(image_bgr) -> list[Detection]` and settable attribute `confidence: float` (runtime changes, read on every call).
-  - `FakeDetector(script: Callable[[int], list[Detection]])` — calls `script(call_index)` each `detect`; `call_index` starts at 0.
+  - `FakeDetector(script: Callable[[int], list[Detection]], confidence: float = 0.4)` — calls `script(call_index)` each `detect`; `call_index` starts at 0; exposes the same settable `confidence` attribute as `RFDETRDetector` (not used for filtering).
   - `build_detector(cfg: DetectorConfig) -> Detector`
   - `class DetectorError(Exception)` (bad size/class name, CUDA missing, weights missing).
 
@@ -260,7 +260,7 @@ Model class from size: `{"nano": RFDETRNano, "small": RFDETRSmall, "medium": RFD
 - Consumes: `Detection`, `Frame`, `Track`, `TrackerResult`, `TrackerConfig`.
 - Produces: `ByteTrackTracker(confirm_hits: int, confirm_window: int, lost_timeout_s: float, fps: float)` implementing `Tracker`; `build_tracker(cfg: TrackerConfig, fps: float) -> Tracker`.
 
-- [ ] **Step 1: Write failing tests** (frames from `fake_frame`, boxes drift 2 px per frame)
+- [ ] **Step 1: Write failing tests** (frames from `fake_frame`, boxes drift 2 px per frame; in the two gap tests the box is stationary so re-association depends only on the timeout)
 
 ```python
 def test_confirmed_after_three_hits():
@@ -341,7 +341,7 @@ Single `sqlite3` connection with `check_same_thread=False`, guarded by a `thread
   - `pick_h264_encoder() -> str` — first available of `["libx264", "h264_nvenc", "libopenh264", "h264_mf"]` per `av.codec.Codec(name, "w")`; raises `RuntimeError` listing all four if none.
   - `write_clip(frames: list[Frame], path: Path, fps: float) -> None` — H.264 MP4, `yuv420p`, even dimensions.
   - `save_snapshot(frame: Frame, box: tuple[float,float,float,float], full_path: Path, crop_path: Path) -> None` — JPEG quality 90; crop padded 15% each side, clamped to image.
-  - `EvidenceRecorder(data_dir: Path, before_s: float, after_s: float)`: `push(frame: Frame)`; `start_clip(key: str, trigger_ts: float, path: Path, on_done: Callable[[Path], None])`; `flush()` (end of stream: finish all pending clips with the frames they have); `close()` (flush + join worker).
+  - `EvidenceRecorder(data_dir: Path, before_s: float, after_s: float)`: `push(frame: Frame)`; `start_clip(key: str, trigger_ts: float, path: Path, on_done: Callable[[Path], None])`; `flush()` (end of stream: finish all pending clips with the frames they have, and **block until every clip is written and its `on_done` has run**); `close()` (flush + shut down worker).
 
 - [ ] **Step 1: Write failing tests**
 
@@ -380,7 +380,7 @@ def test_odd_frame_size_clip(tmp_path):        # 321x241 frames still encode
 - Produces:
   - `EventBus`: `subscribe(maxsize: int = 100) -> queue.Queue[dict]`, `unsubscribe(q)`, `publish(msg: dict)` — never blocks; a full subscriber queue drops its oldest message.
   - `truck_to_json(rec: TruckRecord) -> dict` — keys: `api` (1), `id`, `run_id`, `track_id`, `first_seen`, `last_seen` (ISO-8601 Z), `best_score`, `snapshot_url`, `crop_url`, `clip_url` (`"/media/<relative path>"` URL-quoted, or `None`), `lat`, `lon`, `geo_error_m`, `geo_status`.
-  - `EventManager(repo, evidence, bus, run_id: int, data_dir: Path, snapshot_window_s: float, max_disk_bytes: int)`: `on_frame(frame: Frame, result: TrackerResult) -> None`, `close() -> None`; property `active_count: int`.
+  - `EventManager(repo, evidence, bus, run_id: int, data_dir: Path, snapshot_window_s: float, max_disk_bytes: int)`: `on_frame(frame: Frame, result: TrackerResult) -> None`, `close() -> None`; properties `active_count: int` (confirmed trucks currently tracked) and `total_count: int` (trucks created this run).
   - Bus messages: `{"api":1,"type":"truck.new","truck":{...}}` and `{"api":1,"type":"truck.updated","truck":{...}}`.
 
 - [ ] **Step 1: Write failing tests** (real repo + real recorder in `tmp_path`)
@@ -417,7 +417,7 @@ On first confirmation of a `track_id`: build a `TruckRecord` (`first_seen` = fra
 - Test: `tests/test_pipeline.py`
 
 **Interfaces:**
-- Consumes: everything above. `trucks_now` = `events.active_count`; `trucks_total` = `repo.count_trucks(run_id)`.
+- Consumes: everything above. `trucks_now` = `events.active_count`; `trucks_total` = `events.total_count`.
 - Note: the spec's example config shows `input_size: 960`; this plan defaults to **512** (RF-DETR Small's native size). The best size is picked by benchmark in Plan 6.
 - Produces:
   - `@dataclass PipelineStatus(source_state: str, fps: float, frames_processed: int, trucks_now: int, trucks_total: int, started_at: datetime, telemetry_state: str = "none")` — `source_state` ∈ `"starting" | "running" | "ended" | "error"`; `fps` = processed frames/s over the last 2 s.
