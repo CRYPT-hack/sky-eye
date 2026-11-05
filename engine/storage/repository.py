@@ -125,6 +125,17 @@ class TruckRepository:
             self._conn.execute(sql, [*values, truck_id])
             self._conn.commit()
 
+    def clear_clip_paths(self, rel_paths: list[str]) -> list[int]:
+        """Set clip_path to NULL where it is one of rel_paths; return those truck ids."""
+        if not rel_paths:
+            return []
+        marks = ", ".join("?" * len(rel_paths))
+        sql = f"UPDATE trucks SET clip_path = NULL WHERE clip_path IN ({marks}) RETURNING id"
+        with self._lock:
+            rows = self._conn.execute(sql, list(rel_paths)).fetchall()
+            self._conn.commit()
+        return [int(r[0]) for r in rows]
+
     def get_truck(self, truck_id: int) -> TruckRecord | None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM trucks WHERE id = ?", (truck_id,)).fetchone()

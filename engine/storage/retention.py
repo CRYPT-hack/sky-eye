@@ -1,32 +1,45 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-def enforce_retention(media_root: Path, max_bytes: int) -> list[Path]:
+def enforce_retention(
+    media_root: Path, max_bytes: int, keep: Iterable[Path] = frozenset()
+) -> list[Path]:
     """Delete oldest .mp4 files until total media size fits max_bytes.
 
-    Images are never deleted. Returns the deleted files.
+    Images are never deleted, nor are the files in ``keep`` (e.g. the clip that
+    was just written). Returns the deleted files.
     """
+    kept = {Path(p).resolve() for p in keep}
     files = [p for p in Path(media_root).rglob("*") if p.is_file()]
     total = sum(p.stat().st_size for p in files)
     deleted: list[Path] = []
     if total <= max_bytes:
         return deleted
-    videos = sorted((p for p in files if p.suffix.lower() == ".mp4"), key=lambda p: p.stat().st_mtime)
+    videos = sorted(
+        (p for p in files if p.suffix.lower() == ".mp4" and p.resolve() not in kept),
+        key=lambda p: p.stat().st_mtime,
+    )
     for video in videos:
         if total <= max_bytes:
             break
-        size = video.stat().st_size
-        video.unlink()
+        try:
+            size = video.stat().st_size
+            video.unlink()
+        except OSError as exc:  # e.g. open in a viewer on Windows: try the next one
+            logger.warning("retention: could not delete %s: %s", video, exc)
+            continue
         total -= size
         deleted.append(video)
+        logger.info("retention: deleted %s (%d bytes) to stay under the disk limit", video, size)
     if total > max_bytes:
         logger.warning(
-            "media still over limit (%d > %d bytes) with no .mp4 files left to delete",
+            "media still over limit (%d > %d bytes) with no deletable .mp4 files left",
             total,
             max_bytes,
         )

@@ -147,12 +147,21 @@ class EventManager:
         clip_path = folder / f"{stem}.mp4"
 
         def on_done(path: Path, truck_id: int = truck_id) -> None:
-            self._repo.update_truck(truck_id, clip_path=self._rel(Path(path)))
+            path = Path(path)
+            self._repo.update_truck(truck_id, clip_path=self._rel(path))
+            log.info("clip written for truck %d: %s", truck_id, path)
+            cleared: list[int] = []
             try:
-                enforce_retention(self._media_root, self._max_bytes)
+                deleted = enforce_retention(self._media_root, self._max_bytes, keep={path})
             except OSError as exc:
                 log.warning("media retention failed: %s", exc)
+            else:
+                if deleted:
+                    cleared = self._repo.clear_clip_paths([self._rel(p) for p in deleted])
             self._publish("truck.updated", truck_id)
+            for other in cleared:
+                if other != truck_id:
+                    self._publish("truck.updated", other)
 
         self._evidence.start_clip(stem, frame.ts, clip_path, on_done)
         self._publish("truck.new", truck_id)
