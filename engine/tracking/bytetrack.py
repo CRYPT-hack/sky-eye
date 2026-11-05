@@ -11,9 +11,12 @@ from trackers import ByteTrackTracker as _RfByteTrack
 from engine.config import TrackerConfig
 from engine.core import Detection, Frame, Track, Tracker, TrackerResult
 
-# The trackers package expresses lost_track_buffer in 30 FPS frames and scales it
-# by frame_rate / 30 internally.
+# The trackers package expresses lost_track_buffer in 30 FPS frames; with
+# timestamps it becomes a seconds budget of lost_track_buffer / 30.
 _REFERENCE_FPS = 30.0
+# Library budget = our lost timeout + this margin, so our rule always ends a
+# track first (and removes it from the library, see update()).
+_LIBRARY_MARGIN_S = 1.0
 
 
 @dataclass
@@ -37,7 +40,7 @@ class ByteTrackTracker:
         self._confirm_window = confirm_window
         self._lost_timeout_s = lost_timeout_s
         self._tracker = _RfByteTrack(
-            lost_track_buffer=math.ceil(lost_timeout_s * _REFERENCE_FPS),
+            lost_track_buffer=math.ceil((lost_timeout_s + _LIBRARY_MARGIN_S) * _REFERENCE_FPS),
             frame_rate=fps,
             track_activation_threshold=0.0,  # no extra gate on starting a track
             # Only "high" detections can start a track, so make every detection
@@ -63,7 +66,10 @@ class ByteTrackTracker:
             )
         else:
             sv_dets = sv.Detections.empty()
-        out = self._tracker.update(sv_dets)
+        # Pass the capture time: realtime mode skips a varying number of frames,
+        # and a fixed per-call step would make the Kalman motion model (and the
+        # association) fall apart, splitting one truck into many ids.
+        out = self._tracker.update(sv_dets, timestamp=frame.ts)
 
         # Record spawn time of tracklets that have no id yet, and collect the
         # spawn info for tracklets that just received one.
@@ -110,7 +116,7 @@ class ByteTrackTracker:
             if frame.ts - state.last_seen_ts > self._lost_timeout_s:
                 del self._states[tid]
                 # Make the library forget it too, so the id can never be revived
-                # (its frame budget can outlast our time budget at fractional fps).
+                # (its budget deliberately outlasts ours, see _LIBRARY_MARGIN_S).
                 self._tracker.tracks = [
                     t for t in self._tracker.tracks if t.tracker_id != tid
                 ]
