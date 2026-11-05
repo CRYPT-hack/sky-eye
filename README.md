@@ -47,8 +47,8 @@ within 5 s and was ended forcibly.
 The website in `dashboard/` (React + TypeScript, built with Vite) shows the live
 video, the detected trucks and the engine status. The engine serves the built copy
 from `dashboard/dist/` at `/`. It looks for the build when it starts, so build first,
-then start (or restart) the engine. Needs Node.js 22.12 or newer with npm (tested
-with Node 24.13).
+then start (or restart) the engine. Needs npm and Node.js 22.13 or newer on the 22
+line, Node 24, or Node 26 and newer (tested with Node 24.13).
 
 Build:
 
