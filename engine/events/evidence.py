@@ -61,7 +61,9 @@ def _encode(
     should_stop: Callable[[], bool] | None = None,
 ) -> None:
     height, width = images[0].shape[:2]
-    with av.open(str(path), "w", format="mp4") as container:
+    with av.open(
+        str(path), "w", format="mp4", options={"movflags": "+faststart"}
+    ) as container:
         stream = container.add_stream(encoder, rate=max(1, round(fps)))
         stream.width = width
         stream.height = height

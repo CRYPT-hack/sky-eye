@@ -13,6 +13,7 @@ from engine.events.evidence import (
     FrameRingBuffer,
     pick_h264_encoder,
     save_snapshot,
+    write_clip,
 )
 
 FPS = 30.0
@@ -339,3 +340,30 @@ def test_remove_partial_clips(tmp_path):
     (day / "1_2_full.jpg").write_bytes(b"jpg")
     assert remove_partial_clips(tmp_path) == 1
     assert sorted(p.name for p in day.iterdir()) == ["1_2.mp4", "1_2_full.jpg"]
+
+
+def _top_level_boxes(path) -> list[str]:
+    data = Path(path).read_bytes()
+    boxes, pos = [], 0
+    while pos + 8 <= len(data):
+        size = int.from_bytes(data[pos : pos + 4], "big")
+        kind = data[pos + 4 : pos + 8].decode("latin-1")
+        header = 8
+        if size == 1:
+            size = int.from_bytes(data[pos + 8 : pos + 16], "big")
+            header = 16
+        elif size == 0:
+            size = len(data) - pos
+        assert size >= header
+        boxes.append(kind)
+        pos += size
+    assert pos == len(data)
+    return boxes
+
+
+def test_clip_is_faststart(tmp_path):
+    path = tmp_path / "c.mp4"
+    write_clip([moving_frame(i) for i in range(20)], path, FPS)
+    boxes = _top_level_boxes(path)
+    assert "moov" in boxes and "mdat" in boxes
+    assert boxes.index("moov") < boxes.index("mdat")

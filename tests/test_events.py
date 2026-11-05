@@ -148,6 +148,7 @@ def test_media_urls_quoted(tmp_path):
         for key in ("snapshot_url", "crop_url", "clip_url"):
             assert js[key].startswith("/media/")
             assert " " not in js[key]
+        assert js["snapshot_url"].endswith("?v=8000")
         assert js["first_seen"].endswith("Z")
         assert js["api"] == 1
     finally:
@@ -196,5 +197,52 @@ def test_truck_created_logged(tmp_path, caplog):
             f"truck {rec.id} created" in r.getMessage() and "track 7" in r.getMessage()
             for r in caplog.records
         )
+    finally:
+        rig.close()
+
+
+def test_snapshot_url_has_version(tmp_path):
+    now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    rec = TruckRecord(
+        id=1, run_id=1, track_id=1, first_seen=now, last_seen=now, best_score=0.9,
+        snapshot_path="2026-01-02/a b_full.jpg", crop_path="2026-01-02/a b_crop.jpg",
+        clip_path="2026-01-02/a b.mp4",
+    )
+    js = truck_to_json(rec)
+    assert js["snapshot_url"] == "/media/2026-01-02/a%20b_full.jpg?v=9000"
+    assert js["crop_url"] == "/media/2026-01-02/a%20b_crop.jpg?v=9000"
+    assert js["clip_url"] == "/media/2026-01-02/a%20b.mp4"
+    assert "?" not in js["clip_url"]
+
+
+def test_better_snapshot_publishes_update(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        rig.feed(0, 0.0, result(0.5))
+        rig.feed(1, 1.0, result(0.9))
+        rig.feed(2, 1.1, result(0.9))  # not better: no further update
+        msgs = [m for m in drain(rig.q) if m["type"] in ("truck.new", "truck.updated")]
+        assert msgs[0]["type"] == "truck.new"
+        assert msgs[0]["truck"]["snapshot_url"].endswith("?v=5000")
+        updates = [m for m in msgs if m["type"] == "truck.updated"]
+        assert len(updates) == 1
+        assert updates[0]["truck"]["snapshot_url"].endswith("?v=9000")
+    finally:
+        rig.close()
+
+
+def test_truck_new_published_before_clip_start(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        seen: list[list[str]] = []
+        original = rig.evidence.start_clip
+
+        def spy(*args, **kwargs):
+            seen.append([m["type"] for m in drain(rig.q)])
+            return original(*args, **kwargs)
+
+        rig.evidence.start_clip = spy
+        rig.feed(0, 0.0, result(0.8))
+        assert seen == [["truck.new"]]
     finally:
         rig.close()
