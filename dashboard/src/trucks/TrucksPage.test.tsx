@@ -92,3 +92,14 @@ test("401 reports unauthorized; other errors retry", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByText("Truck #3")).toBeInTheDocument();
 });
+
+test("load more skips trucks already shown", async () => {
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  setup([many(1, 48), many(40, 10)]); // second page repeats ids 40..48
+  await waitFor(() => expect(screen.getAllByText(/^Truck #\d+$/)).toHaveLength(48));
+  await userEvent.click(screen.getByRole("button", { name: "Load more" }));
+  await waitFor(() => expect(screen.getAllByText(/^Truck #\d+$/)).toHaveLength(49));
+  expect(screen.getAllByText("Truck #45")).toHaveLength(1);
+  expect(errors).not.toHaveBeenCalled();
+  errors.mockRestore();
+});

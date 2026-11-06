@@ -39,7 +39,12 @@ export default function TrucksPage() {
         });
         if (id !== requestId.current) return;
         offsetRef.current = offset + res.trucks.length;
-        setTrucks((prev) => (append ? [...prev, ...res.trucks] : res.trucks));
+        setTrucks((prev) => {
+          if (!append) return res.trucks;
+          // Trucks saved since the last page shift the offset: skip rows already shown.
+          const seen = new Set(prev.map((t) => t.id));
+          return [...prev, ...res.trucks.filter((t) => !seen.has(t.id))];
+        });
         setHasMore(res.trucks.length >= PAGE_SIZE);
       } catch (e) {
         if (id !== requestId.current) return;
