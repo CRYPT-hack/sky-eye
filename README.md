@@ -21,8 +21,10 @@ over a small HTTP API with a live MJPEG stream.
 2. Copy the example config: `cp config.example.yaml config.yaml`
 3. Optional, only for token auth: copy `.env.example` to `.env` next to `config.yaml`
    and set `SKYEYE_API_TOKEN` to a long random string.
-4. Build the website once: `cd dashboard`, `npm ci`, `npm run build` (needs Node 24;
-   the engine serves `dashboard/dist/` and cannot show the site without it).
+4. Build the website once: `cd dashboard`, `npm ci`, `npm run build`, then `cd ..`
+   back to the repo root. Needs npm and Node.js 22.13 or newer on the 22 line, Node 24,
+   or Node 26 and newer. The engine serves `dashboard/dist/` and cannot show the site
+   without it.
 5. Put a drone clip at `samples/drone.mp4` (or change `source.path` in `config.yaml`).
 6. Optional: check the setup without starting anything (also downloads the weights):
    `uv run python -m engine --config config.yaml --check`
@@ -48,9 +50,10 @@ within 5 s and was ended forcibly.
 
 The website in `dashboard/` (React + TypeScript, built with Vite) shows the live
 video, the detected trucks and the engine status. The engine serves the built copy
-from `dashboard/dist/` at `/`. It looks for the build when it starts, so build first,
-then start (or restart) the engine. Needs npm and Node.js 22.13 or newer on the 22
-line, Node 24, or Node 26 and newer (tested with Node 24.13).
+from `dashboard/dist/` at `/`. It checks for the build on every page load, so a build
+made while the engine runs shows up when you reload the page (no restart). Needs npm
+and Node.js 22.13 or newer on the 22 line, Node 24, or Node 26 and newer (tested with
+Node 24.13).
 
 Build:
 
