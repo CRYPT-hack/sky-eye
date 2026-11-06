@@ -5,6 +5,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -23,6 +24,10 @@ _ENCODER_CANDIDATES = ["libx264", "h264_nvenc", "libopenh264", "h264_mf"]
 _X264_THREADS = "2"  # leave the CPU to capture and inference
 _PART_SUFFIX = ".part"
 DEFAULT_MAX_CLIP_JOBS = 6
+# Windows refuses to replace a file that a reader (the HTTP server) has open:
+# retry the rename for up to about _REPLACE_TRIES * _REPLACE_WAIT_S.
+_REPLACE_TRIES = 25
+_REPLACE_WAIT_S = 0.01
 _encoder_lock = threading.Lock()
 _encoder_cache: str | None = None
 
@@ -61,7 +66,9 @@ def _encode(
     should_stop: Callable[[], bool] | None = None,
 ) -> None:
     height, width = images[0].shape[:2]
-    with av.open(str(path), "w", format="mp4") as container:
+    with av.open(
+        str(path), "w", format="mp4", options={"movflags": "+faststart"}
+    ) as container:
         stream = container.add_stream(encoder, rate=max(1, round(fps)))
         stream.width = width
         stream.height = height
@@ -146,7 +153,10 @@ def save_snapshot(
 
     The crop is clamped to the image and is at least 1x1 pixel, even for a
     degenerate or off-image box. Files are written with Path.write_bytes, so
-    non-ASCII folders work on Windows (cv2.imwrite does not).
+    non-ASCII folders work on Windows (cv2.imwrite does not). Each file is
+    written to ``<name>.part`` and renamed into place, so a reader sees the old
+    file or the new one, never half of one; on failure the old file is kept and
+    OSError is raised.
     """
     image = frame.image
     h, w = image.shape[:2]
@@ -165,7 +175,24 @@ def _write_jpeg(path: Path, image: np.ndarray) -> None:
     if not ok:
         raise OSError(f"failed to encode {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(buf.tobytes())
+    tmp = path.with_name(path.name + _PART_SUFFIX)
+    try:
+        tmp.write_bytes(buf.tobytes())
+        _replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _replace(src: Path, dst: Path) -> None:
+    for attempt in range(_REPLACE_TRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_TRIES - 1:
+                raise
+            time.sleep(_REPLACE_WAIT_S)
 
 
 @dataclass

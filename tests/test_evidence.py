@@ -13,6 +13,7 @@ from engine.events.evidence import (
     FrameRingBuffer,
     pick_h264_encoder,
     save_snapshot,
+    write_clip,
 )
 
 FPS = 30.0
@@ -335,7 +336,131 @@ def test_remove_partial_clips(tmp_path):
     day = tmp_path / "2026-11-05"
     day.mkdir()
     (day / "1_3.mp4.part").write_bytes(b"half")
+    (day / "1_3_full.jpg.part").write_bytes(b"half")
     (day / "1_2.mp4").write_bytes(b"clip")
     (day / "1_2_full.jpg").write_bytes(b"jpg")
-    assert remove_partial_clips(tmp_path) == 1
+    assert remove_partial_clips(tmp_path) == 2
     assert sorted(p.name for p in day.iterdir()) == ["1_2.mp4", "1_2_full.jpg"]
+
+
+def _top_level_boxes(path) -> list[str]:
+    data = Path(path).read_bytes()
+    boxes, pos = [], 0
+    while pos + 8 <= len(data):
+        size = int.from_bytes(data[pos : pos + 4], "big")
+        kind = data[pos + 4 : pos + 8].decode("latin-1")
+        header = 8
+        if size == 1:
+            size = int.from_bytes(data[pos + 8 : pos + 16], "big")
+            header = 16
+        elif size == 0:
+            size = len(data) - pos
+        assert size >= header
+        boxes.append(kind)
+        pos += size
+    assert pos == len(data)
+    return boxes
+
+
+def test_clip_is_faststart(tmp_path):
+    path = tmp_path / "c.mp4"
+    write_clip([moving_frame(i) for i in range(20)], path, FPS)
+    boxes = _top_level_boxes(path)
+    assert "moov" in boxes and "mdat" in boxes
+    assert boxes.index("moov") < boxes.index("mdat")
+
+
+def test_snapshot_written_via_temp_file(tmp_path, monkeypatch):
+    # Readers (the dashboard) fetch snapshots while a better one is being saved:
+    # each file is written beside the target and renamed into place.
+    moves: list[tuple[Path, Path]] = []
+    real_replace = evidence_mod.os.replace
+
+    def spy(src, dst):
+        moves.append((Path(src), Path(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(evidence_mod.os, "replace", spy)
+    full, crop = tmp_path / "1_2_full.jpg", tmp_path / "1_2_crop.jpg"
+    for i in range(2):  # first save and an update of existing files
+        save_snapshot(moving_frame(i), (100, 100, 140, 120), full, crop)
+    assert [dst for _, dst in moves] == [full, crop, full, crop]
+    for src, dst in moves:
+        assert src != dst and src.parent == dst.parent and src.name.endswith(".part")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["1_2_crop.jpg", "1_2_full.jpg"]
+
+
+def test_snapshot_failed_write_leaves_old_file_and_no_temp(tmp_path, monkeypatch):
+    full, crop = tmp_path / "full.jpg", tmp_path / "crop.jpg"
+    save_snapshot(moving_frame(0), (100, 100, 140, 120), full, crop)
+    before = full.read_bytes()
+
+    def broken(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(evidence_mod.os, "replace", broken)
+    with pytest.raises(OSError):
+        save_snapshot(moving_frame(9), (100, 100, 140, 120), full, crop)
+    assert full.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["crop.jpg", "full.jpg"]
+
+
+def test_snapshot_update_waits_for_a_reader_to_close(tmp_path):
+    # On Windows a file open for reading cannot be replaced: the rename retries
+    # briefly instead of failing (elsewhere it simply succeeds at once).
+    full, crop = tmp_path / "full.jpg", tmp_path / "crop.jpg"
+    save_snapshot(moving_frame(0), (100, 100, 140, 120), full, crop)
+    old = full.read_bytes()
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        try:
+            save_snapshot(moving_frame(30), (100, 100, 140, 120), full, crop)
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    with open(full, "rb") as reader:
+        thread = threading.Thread(target=writer)
+        thread.start()
+        time.sleep(0.05)
+        assert reader.read() == old  # the open reader still sees the complete old file
+    thread.join(5)
+    assert not thread.is_alive() and errors == []
+    assert full.read_bytes() != old
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["crop.jpg", "full.jpg"]
+
+
+def test_snapshot_reader_never_sees_a_partial_file(tmp_path):
+    rng = np.random.default_rng(0)
+    frames = [
+        Frame(rng.integers(0, 255, (720, 1280, 3), dtype=np.uint8), i / FPS,
+              datetime.now(timezone.utc), i)
+        for i in range(2)
+    ]
+    full, crop = tmp_path / "full.jpg", tmp_path / "crop.jpg"
+    save_snapshot(frames[0], (100, 100, 400, 300), full, crop)
+    stop = threading.Event()
+    bad: list[int] = []
+    reads = [0]
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                data = full.read_bytes()
+            except PermissionError:  # Windows: caught mid-rename
+                continue
+            reads[0] += 1
+            if not (data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9")):
+                bad.append(len(data))
+            time.sleep(0.002)
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    try:
+        for i in range(20):
+            save_snapshot(frames[i % 2], (100, 100, 400, 300), full, crop)
+    finally:
+        stop.set()
+        thread.join(5)
+    assert reads[0] > 0 and bad == []
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["crop.jpg", "full.jpg"]

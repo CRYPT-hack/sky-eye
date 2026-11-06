@@ -31,6 +31,11 @@ def _media_url(path: str | None) -> str | None:
     return None if path is None else "/media/" + quote(path, safe="/")
 
 
+def _versioned(path: str | None, best_score: float) -> str | None:
+    url = _media_url(path)
+    return None if url is None else f"{url}?v={int(round(best_score * 10000))}"
+
+
 def truck_to_json(rec: TruckRecord) -> dict:
     return {
         "api": 1,
@@ -40,8 +45,8 @@ def truck_to_json(rec: TruckRecord) -> dict:
         "first_seen": _iso(rec.first_seen),
         "last_seen": _iso(rec.last_seen),
         "best_score": rec.best_score,
-        "snapshot_url": _media_url(rec.snapshot_path),
-        "crop_url": _media_url(rec.crop_path),
+        "snapshot_url": _versioned(rec.snapshot_path, rec.best_score),
+        "crop_url": _versioned(rec.crop_path, rec.best_score),
         "clip_url": _media_url(rec.clip_path),
         "lat": rec.lat,
         "lon": rec.lon,
@@ -104,6 +109,7 @@ class EventManager:
             self._bus.publish({"api": 1, "type": kind, "truck": truck_to_json(rec)})
 
     def on_frame(self, frame: Frame, result: TrackerResult) -> None:
+        improved: list[int] = []
         with self._lock:
             for track in result.confirmed:
                 state = self._active.get(track.track_id)
@@ -113,17 +119,32 @@ class EventManager:
                     continue
                 state.last_seen = frame.wall_time
                 if frame.ts - state.first_ts <= self._window and score > state.best_score:
-                    save_snapshot(frame, track.detection.box, state.full_path, state.crop_path)
+                    try:
+                        save_snapshot(
+                            frame, track.detection.box, state.full_path, state.crop_path
+                        )
+                    except OSError as exc:
+                        # the earlier snapshot stays; a later, better frame may still win
+                        log.warning(
+                            "could not update the snapshot of truck %d: %s", state.truck_id, exc
+                        )
+                        continue
                     state.best_score = score
                     self._repo.update_truck(state.truck_id, best_score=score)
+                    if state.truck_id not in improved:
+                        improved.append(state.truck_id)
             ended = [self._active.pop(t) for t in result.ended_ids if t in self._active]
             for state in ended:
                 self._repo.update_truck(state.truck_id, last_seen=state.last_seen)
+        ended_ids = {state.truck_id for state in ended}
+        for truck_id in improved:
+            if truck_id not in ended_ids:
+                self._publish("truck.updated", truck_id)
         for state in ended:
             self._publish("truck.updated", state.truck_id)
 
     def _create(self, frame: Frame, track_id: int, det) -> None:
-        # called with self._lock held; publishes truck.new after registering state
+        # called with self._lock held; publishes truck.new before starting the clip
         folder = day_dir(self._data_dir, frame.wall_time)
         stem = f"{self._run_id}_{track_id}"
         full_path = folder / f"{stem}_full.jpg"
@@ -164,8 +185,8 @@ class EventManager:
                 if other != truck_id:
                     self._publish("truck.updated", other)
 
-        self._evidence.start_clip(stem, frame.ts, clip_path, on_done)
         self._publish("truck.new", truck_id)
+        self._evidence.start_clip(stem, frame.ts, clip_path, on_done)
 
     def close(self) -> None:
         with self._lock:

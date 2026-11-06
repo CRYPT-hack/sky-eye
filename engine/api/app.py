@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import queue
 import threading
 from dataclasses import asdict, dataclass, field
@@ -13,7 +14,7 @@ from typing import Annotated, Any
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -26,12 +27,27 @@ from engine.events.manager import _iso, truck_to_json
 from engine.pipeline import Pipeline, RuntimeSettings
 from engine.storage import TruckRepository, media_dir
 
+log = logging.getLogger(__name__)
+
 API_VERSION = 1
 VERSION = "0.1.0"
 BOUNDARY = "frame"
 STATUS_INTERVAL_S = 1.0
 WS_POLL_S = 0.05
 WS_GOING_AWAY = 1001
+BUILD_HINT = "not built - run: cd dashboard && npm ci && npm run build, then reload this page"
+
+
+class _LaterStaticFiles(StaticFiles):
+    """StaticFiles for a folder that may only appear after startup (the dashboard
+    build): every request looks again, and a missing folder is a plain 404.
+
+    Starlette checks the folder once, on the first request, and answers 500 for
+    good if it was missing then.
+    """
+
+    async def check_config(self) -> None:
+        return None
 
 
 @dataclass
@@ -43,6 +59,8 @@ class EngineContext:
     data_dir: Path
     api: ApiConfig
     token: str | None = None
+    info: dict[str, Any] = field(default_factory=dict)  # served by GET /api/info
+    dashboard_dir: Path | None = None  # built website; None = nothing to serve
     # Set when the engine is shutting down (Ctrl+C): long-lived responses
     # (MJPEG stream, WebSocket) end so the HTTP server can stop.
     shutdown: threading.Event = field(default_factory=threading.Event)
@@ -83,9 +101,35 @@ def create_app(ctx: EngineContext) -> FastAPI:
             status_code=422,
         )
 
-    @app.get("/")
-    def root() -> dict[str, Any]:
-        return {"api": API_VERSION, "name": "sky-eye", "version": VERSION}
+    # Looked up on every request, so a build made while the engine runs is served
+    # on the next page load, without a restart.
+    index = ctx.dashboard_dir / "index.html" if ctx.dashboard_dir else None
+    assets = ctx.dashboard_dir / "assets" if ctx.dashboard_dir else None
+    banner = {"api": API_VERSION, "name": "sky-eye", "version": VERSION}
+
+    def has_index() -> bool:
+        return index is not None and index.is_file()
+
+    if index is not None and not has_index():
+        log.warning(
+            "dashboard not built (%s is missing) - run: cd dashboard && npm ci && "
+            "npm run build, then reload the page",
+            index,
+        )
+
+    @app.get("/api")
+    def api_root() -> dict[str, Any]:
+        return banner
+
+    @app.get("/api/info")
+    def info() -> dict[str, Any]:
+        return {"api": API_VERSION, "info": {**ctx.info, "dashboard": has_index()}}
+
+    @app.get("/", response_model=None)
+    def root() -> Any:
+        if index is not None and has_index():
+            return FileResponse(index, headers={"Cache-Control": "no-cache"})
+        return {**banner, "dashboard": BUILD_HINT}
 
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
@@ -119,6 +163,11 @@ def create_app(ctx: EngineContext) -> FastAPI:
 
     @app.put("/api/config/runtime")
     async def put_runtime(request: Request) -> Any:
+        # Only JSON: a cross-site page cannot send it without a CORS preflight,
+        # which the engine never allows (a form or text/plain body is refused).
+        media_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+        if media_type != "application/json":
+            return JSONResponse({"api": API_VERSION, "error": "expected application/json"}, 415)
         try:
             body = await request.json()
         except ValueError:
@@ -182,5 +231,7 @@ def create_app(ctx: EngineContext) -> FastAPI:
         finally:
             ctx.bus.unsubscribe(q)
 
+    if assets is not None:
+        app.mount("/assets", _LaterStaticFiles(directory=assets, check_dir=False), name="assets")
     app.mount("/media", StaticFiles(directory=media_dir(ctx.data_dir)), name="media")
     return app

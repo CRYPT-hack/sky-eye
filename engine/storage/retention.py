@@ -8,19 +8,22 @@ logger = logging.getLogger(__name__)
 
 
 PARTIAL_CLIP_GLOB = "*.mp4.part"
+PARTIAL_GLOBS = (PARTIAL_CLIP_GLOB, "*.jpg.part")  # clips and snapshots
 
 
 def remove_partial_clips(media_root: Path) -> int:
-    """Delete clip temp files left by a crash or a forced exit; return how many."""
+    """Delete clip and snapshot temp files left by a crash or a forced exit;
+    return how many."""
     removed = 0
-    for part in Path(media_root).rglob(PARTIAL_CLIP_GLOB):
+    parts = [p for pattern in PARTIAL_GLOBS for p in Path(media_root).rglob(pattern)]
+    for part in parts:
         try:
             part.unlink()
             removed += 1
         except OSError as exc:
-            logger.warning("could not delete partial clip %s: %s", part, exc)
+            logger.warning("could not delete unfinished media file %s: %s", part, exc)
     if removed:
-        logger.info("removed %d partial clip file(s) left by an earlier run", removed)
+        logger.info("removed %d unfinished media file(s) left by an earlier run", removed)
     return removed
 
 

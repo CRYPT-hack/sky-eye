@@ -1,0 +1,894 @@
+/*
+  sky-eye dashboard styles. One file, no framework, no web fonts.
+
+  Theme
+    All colours, spacing, radius and type sizes are custom properties on :root.
+    Light values are the default; dark values sit under prefers-color-scheme: dark.
+    Signal yellow (--accent) means "truck" and nothing else:
+      --accent + --on-accent   filled truck marks (badges, highlight rings)
+      --accent-ink             truck-related text and numbers (readable in both themes)
+      --accent-wash/-edge      background and border of a truck-highlighted tile
+    Status tones: --info, --warn, --error, --ok, each with a matching --*-bg.
+    Layout switches at 768px: below it the nav is a bottom tab bar.
+    Headings, paragraphs and lists have no default margins: space them with the
+    gaps of .page, .section, .stack or .card.
+
+  App shell (App.tsx)
+    .app-header  .brand  .brand-mark  .app-nav  .nav-link  .nav-icon  .app-main
+
+  Building blocks for pages
+    .page            page container: centred, max --page-max wide, side gutter,
+                     children stacked with even gaps
+    .page-head       title row: .page-title plus optional actions; wraps
+    .section         block inside a page, with a .section-title heading
+    .stack           vertical flow; set --stack-gap to change the gap
+    .card            surface panel (padded column); .card-media is an edge-to-edge
+                     4:3 image area (first child; the image fills it, cropped to
+                     fit), .card-title, .card-meta;
+                     .card--link makes the whole card a link;
+                     .is-new rings a newly arrived truck once
+    .stats, .stat    row of stat tiles and one tile: .stat-label, .stat-value
+                     (numbers; add .stat-value--text for a word such as the source
+                     state), .stat-note; .stat--truck marks a truck count with the accent
+    .banner          message strip: .banner--info, .banner--warn, .banner--error
+    .button          44px tap target: .button--primary, .button--quiet,
+                     [aria-pressed="true"] for toggles, :disabled
+    .grid            responsive card grid, 1 column at 375px and more when wider;
+                     set --grid-min to change the narrowest column
+    .strip           horizontal scroller of cards; scrolls itself, never the page
+    .badge           small label: .badge--truck, .badge--ok, .badge--warn, .badge--error
+    .dialog          modal panel, on a native <dialog> or a role="dialog" element;
+                     .dialog-backdrop is the overlay for a non-native dialog;
+                     .dialog-title, .dialog-actions
+    .field           labelled control: .field-label, .field-hint, .field-error;
+                     .input for text, password and date inputs; range inputs styled too
+    .facts           <dl> of label/value pairs
+    .stream          16:9 black video frame; .stream-message overlays text on it;
+                     .stream--bleed spans the full screen width on phones (only as a
+                     direct child of .page)
+    .detail-media    a truck's full frame or clip on its detail page; add
+                     .detail-crop for the close-up, scaled up in a 4:3 box
+    .empty           empty, placeholder or error state panel
+    .muted  .visually-hidden
+*/
+
+/* ---------- Theme ---------- */
+
+:root {
+  color-scheme: light dark;
+
+  /* Light: cool fog with ink text */
+  --bg: #eef1f4;
+  --surface: #ffffff;
+  --raised: #f6f8fa;
+  --sunken: #e3e8ed;
+  --line: #c9d1d9;
+  --line-strong: #7d8996;
+  --text: #141a20;
+  --muted: #4d5966;
+  --accent: #f2c000;
+  --accent-ink: #614700;
+  --accent-wash: #fff6d1;
+  --accent-edge: #e0c35c;
+  --on-accent: #1a1500;
+  --focus: #1f6fd1;
+  --info: #1f5fae;
+  --info-bg: #e4eefb;
+  --warn: #a04a00;
+  --warn-bg: #fcefe2;
+  --error: #b3261e;
+  --error-bg: #fbe7e5;
+  --ok: #1e7a4c;
+  --ok-bg: #e2f3ea;
+  --video-bg: #000000;
+  --on-video: #e9edf1;
+  --scrim: rgb(20 26 32 / 0.55);
+  --shadow-dialog: 0 18px 48px rgb(20 26 32 / 0.28);
+
+  /* Type: the platform's UI face (Segoe UI, San Francisco, Roboto), tabular figures */
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --text-xs: 0.75rem;
+  --text-s: 0.875rem;
+  --text-m: 1rem;
+  --text-l: 1.125rem;
+  --text-xl: 1.3125rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 2.25rem;
+  --text-4xl: 3rem;
+
+  /* Spacing */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  /* Radius grows with the size of the thing: controls, panels, dialogs */
+  --radius-s: 4px;
+  --radius-m: 8px;
+  --radius-l: 12px;
+
+  /* Sizes */
+  --tap: 2.75rem;
+  --tabbar-h: 3.75rem;
+  --header-h: 3.5rem;
+  --page-max: 75rem;
+  --gutter: var(--space-4);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Dark: graphite, so the drone video's own colours read true */
+    --bg: #1b2027;
+    --surface: #232a33;
+    --raised: #2b333d;
+    --sunken: #161a20;
+    --line: #38424e;
+    --line-strong: #6f7c8a;
+    --text: #e9edf1;
+    --muted: #a3adb9;
+    --accent: #f5c400;
+    --accent-ink: #f5c400;
+    --accent-wash: #2b2b22;
+    --accent-edge: #5a4d14;
+    --on-accent: #1a1500;
+    --focus: #6cb2ff;
+    --info: #6cb2ff;
+    --info-bg: #1f2d3d;
+    --warn: #ff9f4f;
+    --warn-bg: #3a2b1f;
+    --error: #ff7a70;
+    --error-bg: #3d2224;
+    --ok: #5fd39a;
+    --ok-bg: #1d3329;
+    --scrim: rgb(5 8 12 / 0.7);
+    --shadow-dialog: 0 18px 48px rgb(0 0 0 / 0.5);
+  }
+}
+
+/* ---------- Base ---------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--text-m);
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: break-word;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:where(h1, h2, h3, h4, p, figure, dl, dd, ul, ol) {
+  margin: 0;
+}
+
+:where(ul[class], ol[class]) {
+  padding: 0;
+  list-style: none;
+}
+
+img,
+svg,
+video {
+  display: block;
+  max-width: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: inherit;
+  text-underline-offset: 0.18em;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* ---------- App shell ---------- */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: var(--header-h);
+  padding-inline: max(var(--gutter), calc((100% - var(--page-max)) / 2));
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--tap);
+  color: var(--text);
+  font-size: var(--text-l);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-decoration: none;
+}
+
+.brand-mark {
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.brand-dot {
+  fill: var(--accent);
+}
+
+/* Phones: the nav is a bottom tab bar within thumb reach. */
+.app-nav {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+
+.nav-link {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.125rem;
+  min-height: var(--tabbar-h);
+  color: var(--muted);
+  font-size: var(--text-s);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.nav-link[aria-current] {
+  color: var(--text);
+}
+
+.nav-link[aria-current]::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  right: 28%;
+  left: 28%;
+  height: 3px;
+  border-radius: 0 0 3px 3px;
+  background: var(--text);
+}
+
+.nav-link:focus-visible {
+  outline-offset: -3px;
+}
+
+.nav-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.app-main {
+  padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px));
+}
+
+/* ---------- Layout ---------- */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  width: 100%;
+  max-width: calc(var(--page-max) + 2 * var(--gutter));
+  margin-inline: auto;
+  padding: var(--space-5) var(--gutter) var(--space-6);
+}
+
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.page-title {
+  font-size: var(--text-2xl);
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.section-title {
+  font-size: var(--text-l);
+  line-height: 1.3;
+  font-weight: 650;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--stack-gap, var(--space-3));
+  min-width: 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--grid-min, 15rem)), 1fr));
+  gap: var(--space-4);
+}
+
+.grid > * {
+  min-width: 0;
+}
+
+/* The padding (offset by the negative margin) keeps focus rings inside the scroll box. */
+.strip {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 11rem;
+  gap: var(--space-3);
+  min-width: 0;
+  margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-2)) 0;
+  padding: var(--space-2) var(--space-2) var(--space-3);
+  scroll-padding-inline: var(--space-2);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+}
+
+.strip > * {
+  scroll-snap-align: start;
+}
+
+/* ---------- Card ---------- */
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-4);
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  overflow: hidden;
+}
+
+/* min-height: 0 lets the flex column keep the 4:3 box: a tall crop would
+   otherwise stretch it to the image's own height. The image fills the box. */
+.card-media {
+  margin: calc(-1 * var(--space-4)) calc(-1 * var(--space-4)) var(--space-1);
+  aspect-ratio: 4 / 3;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--sunken);
+}
+
+.card-media img,
+.card-media video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.card-title {
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-s);
+}
+
+.card--link {
+  text-decoration: none;
+}
+
+.card.is-new {
+  animation: truck-arrive 2.4s ease-out 1;
+}
+
+@keyframes truck-arrive {
+  from {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent);
+  }
+  to {
+    box-shadow: 0 0 0 3px transparent;
+  }
+}
+
+/* ---------- Stat tiles ---------- */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr));
+  gap: var(--space-3);
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+}
+
+.stat-label {
+  color: var(--muted);
+  font-size: var(--text-s);
+}
+
+.stat-value {
+  font-size: var(--text-3xl);
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-value--text {
+  font-size: var(--text-xl);
+  line-height: 1.6;
+  letter-spacing: 0;
+}
+
+.stat-note {
+  color: var(--muted);
+  font-size: var(--text-s);
+}
+
+.stat--truck {
+  background: var(--accent-wash);
+  border-color: var(--accent-edge);
+  box-shadow: inset 4px 0 0 var(--accent);
+}
+
+.stat--truck .stat-value {
+  color: var(--accent-ink);
+}
+
+/* ---------- Banner ---------- */
+
+.banner {
+  --tone: var(--info);
+  --tone-bg: var(--info-bg);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  color: var(--text);
+  background: var(--tone-bg);
+  border-inline-start: 4px solid var(--tone);
+  border-radius: var(--radius-s);
+}
+
+.banner--info {
+  --tone: var(--info);
+  --tone-bg: var(--info-bg);
+}
+
+.banner--warn {
+  --tone: var(--warn);
+  --tone-bg: var(--warn-bg);
+}
+
+.banner--error {
+  --tone: var(--error);
+  --tone-bg: var(--error-bg);
+}
+
+/* ---------- Button ---------- */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: var(--tap);
+  padding: 0 var(--space-4);
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-s);
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.button--primary,
+.button[aria-pressed="true"] {
+  color: var(--bg);
+  background: var(--text);
+  border-color: var(--text);
+}
+
+.button--quiet {
+  background: transparent;
+  border-color: transparent;
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (hover: hover) {
+  .button:hover:not(:disabled) {
+    background: var(--sunken);
+  }
+
+  .button--primary:hover:not(:disabled),
+  .button[aria-pressed="true"]:hover:not(:disabled) {
+    background: var(--muted);
+    border-color: var(--muted);
+  }
+
+  .card--link:hover {
+    border-color: var(--line-strong);
+  }
+
+  .nav-link:hover {
+    color: var(--text);
+  }
+}
+
+/* ---------- Badge ---------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0.125rem var(--space-2);
+  color: var(--text);
+  background: var(--sunken);
+  border-radius: var(--radius-s);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge--truck {
+  color: var(--on-accent);
+  background: var(--accent);
+}
+
+.badge--ok {
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+
+.badge--warn {
+  color: var(--warn);
+  background: var(--warn-bg);
+}
+
+.badge--error {
+  color: var(--error);
+  background: var(--error-bg);
+}
+
+/* ---------- Dialog ---------- */
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: var(--scrim);
+}
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 100%;
+  max-width: 26rem;
+  max-height: calc(100dvh - 2 * var(--space-4));
+  margin: auto;
+  padding: var(--space-5);
+  overflow: auto;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-dialog);
+}
+
+/* A native modal sits in the top layer with no backdrop padding, so leave a gutter. */
+.dialog:is(dialog) {
+  width: calc(100% - 2 * var(--space-4));
+}
+
+.dialog:is(dialog):not([open]) {
+  display: none;
+}
+
+.dialog::backdrop {
+  background: rgb(10 14 18 / 0.6);
+}
+
+.dialog-title {
+  font-size: var(--text-xl);
+  line-height: 1.25;
+  font-weight: 700;
+}
+
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+/* ---------- Form fields ---------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.field-label {
+  font-weight: 600;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: var(--text-s);
+}
+
+.field-error {
+  color: var(--error);
+  font-size: var(--text-s);
+}
+
+.input {
+  width: 100%;
+  min-height: var(--tap);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-s);
+  /* 16px or larger stops phones from zooming in on focus */
+  font-size: var(--text-m);
+}
+
+input[type="range"] {
+  width: 100%;
+  min-height: var(--tap);
+  margin: 0;
+  accent-color: var(--text);
+}
+
+/* ---------- Facts list ---------- */
+
+.facts {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr);
+  gap: var(--space-2) var(--space-4);
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  min-width: 0;
+}
+
+/* ---------- Video frame ---------- */
+
+.stream {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: var(--video-bg);
+  border-radius: var(--radius-m);
+}
+
+.stream img,
+.stream video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.stream-message {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  color: var(--on-video);
+  background: rgb(0 0 0 / 0.6);
+  text-align: center;
+}
+
+/* ---------- States and utilities ---------- */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-4);
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-m);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- Phones only ---------- */
+
+@media (max-width: 767px) {
+  .stream--bleed {
+    width: auto;
+    margin-inline: calc(-1 * var(--gutter));
+    border-radius: 0;
+  }
+}
+
+/* ---------- Wide screens: nav moves into the top bar ---------- */
+
+@media (min-width: 768px) {
+  :root {
+    --gutter: var(--space-5);
+    --header-h: 4rem;
+  }
+
+  .app-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  .app-nav {
+    position: static;
+    display: flex;
+    align-self: stretch;
+    gap: var(--space-1);
+    padding: 0;
+    background: none;
+    border: 0;
+  }
+
+  .nav-link {
+    min-height: 0;
+    padding: 0 var(--space-4);
+    font-size: var(--text-m);
+  }
+
+  .nav-link[aria-current]::before {
+    top: auto;
+    right: var(--space-3);
+    bottom: -1px;
+    left: var(--space-3);
+    border-radius: 3px 3px 0 0;
+  }
+
+  .nav-icon {
+    display: none;
+  }
+
+  .app-main {
+    padding-bottom: 0;
+  }
+
+  .page {
+    padding-top: var(--space-6);
+  }
+
+  .stat-value:not(.stat-value--text) {
+    font-size: var(--text-4xl);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------- Truck detail media ---------- */
+
+.detail-media {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-m);
+  background: #000;
+}
+
+/* The close-up crop is small: scale it up in a 4:3 box so the truck is easy to see. */
+.detail-crop {
+  width: 100%;
+  max-width: 32rem;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  background: var(--sunken);
+}

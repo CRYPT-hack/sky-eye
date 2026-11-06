@@ -10,11 +10,12 @@ import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from types import FrameType
 
 import uvicorn
 
-from engine.api.app import EngineContext, create_app
+from engine.api.app import VERSION, EngineContext, create_app
 from engine.config import AppConfig, ConfigError, load_config
 from engine.detectors.rfdetr import DetectorError, build_detector
 from engine.events.bus import EventBus
@@ -61,6 +62,44 @@ def load_dotenv(path: Path) -> None:
         if not key:
             continue
         os.environ.setdefault(key, value)
+
+
+def _gpu_name(device: str) -> str | None:
+    if device != "cuda":
+        return None
+    try:
+        import torch
+
+        return torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    except Exception:  # noqa: BLE001 - informational only, never fatal
+        return None
+
+
+def _default_dashboard_dir() -> Path:
+    return Path(__file__).resolve().parents[1] / "dashboard" / "dist"
+
+
+def _engine_info(cfg: AppConfig, source_fps: float) -> dict[str, Any]:
+    if cfg.source.type == "file":
+        name = cfg.source.path.name if cfg.source.path else ""  # file name only: no folders
+    else:
+        name = f"capture device {cfg.source.device}"
+    return {
+        "version": VERSION,
+        "source": {
+            "type": "file" if cfg.source.type == "file" else "capture",
+            "name": name,
+            "fps": float(source_fps),
+        },
+        "detector": {
+            "model": f"rfdetr-{cfg.detector.size}",
+            "input_size": cfg.detector.input_size,
+            "device": cfg.detector.device,
+            "gpu": _gpu_name(cfg.detector.device),
+            "classes": list(cfg.detector.classes),
+        },
+        "auth": cfg.api.auth.mode,
+    }
 
 
 def build_engine(cfg: AppConfig) -> EngineContext:
@@ -141,6 +180,8 @@ def build_engine(cfg: AppConfig) -> EngineContext:
         data_dir=data_dir,
         api=cfg.api,
         token=os.environ.get("SKYEYE_API_TOKEN"),
+        info=_engine_info(cfg, source.fps),
+        dashboard_dir=cfg.api.dashboard_dir or _default_dashboard_dir(),
     )
 
 

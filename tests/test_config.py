@@ -145,3 +145,9 @@ def test_config_with_bom_loads(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_bytes(b"\xef\xbb\xbfdetector:\n  size: nano\n")
     assert load_config(p).detector.size == "nano"
+
+
+def test_dashboard_dir_default_and_relative(tmp_path):
+    assert load_config(_write(tmp_path, "{}")).api.dashboard_dir is None
+    cfg = load_config(_write(tmp_path, "api:\n  dashboard_dir: web\n"))
+    assert cfg.api.dashboard_dir == tmp_path / "web"

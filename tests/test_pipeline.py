@@ -425,6 +425,38 @@ def test_stop_with_clip_backlog_is_prompt(tmp_path, monkeypatch):
         rig.close()
 
 
+def test_source_end_reported_while_clips_still_flush(tmp_path, monkeypatch):
+    # The dashboard shows "Video finished" from source_state: it must not wait for
+    # the clip queue, which can take a minute on a loaded machine.
+    import threading
+
+    import engine.events.evidence as evidence_mod
+
+    encoding = threading.Event()
+    release = threading.Event()
+
+    def blocked_write(frames, path, fps, should_stop=None):
+        encoding.set()
+        assert release.wait(10)
+        path.write_bytes(b"clip")
+
+    monkeypatch.setattr(evidence_mod, "write_clip", blocked_write)
+    video = make_video(tmp_path / "v.mp4", 30)
+    rig = Rig(tmp_path, video, FakeDetector(lambda i: [truck(BOX_A)]), after_s=0.2)
+    try:
+        rig.pipeline.start()
+        assert encoding.wait(5)
+        assert wait_until(lambda: rig.pipeline.status().source_state == "ended", 5.0)
+        assert rig.pipeline.wait(0.2) is False  # wait() still means "pipeline finished"
+        release.set()
+        assert rig.pipeline.wait(10) is True
+        assert rig.pipeline.status().source_state == "ended"
+        assert rig.repo.list_trucks()[0].clip_path is not None
+    finally:
+        release.set()
+        rig.close()
+
+
 def test_repeated_frame_failures_are_summarised(tmp_path, caplog, monkeypatch):
     import engine.pipeline as pipeline_mod
 
