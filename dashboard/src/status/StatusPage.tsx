@@ -3,11 +3,18 @@ import { ApiError } from "../api/client";
 import type { Info, Status } from "../api/types";
 import { useApi } from "../apiContext";
 import Banner from "../components/Banner";
-import { formatDuration, formatScore } from "../format";
+import { formatDuration, formatFps, formatScore, formatSourceState } from "../format";
 
 const POLL_MS = 2000;
 const SAVE_DEBOUNCE_MS = 400;
 const SAVED_SHOWN_MS = 2000;
+
+const UNREACHABLE = "Cannot reach the engine";
+
+/** Source frame rate as the engine reports it, to 2 decimals at most: `29.97`, `30`. */
+function sourceFps(fps: number): string {
+  return String(Math.round(fps * 100) / 100);
+}
 
 function isVisible(): boolean {
   return document.visibilityState === "visible";
@@ -45,6 +52,8 @@ export default function StatusPage() {
         reportUnauthorized();
         return null;
       }
+      // fetch() rejects with a TypeError when the engine is down or unreachable.
+      if (e instanceof TypeError) return UNREACHABLE;
       return e instanceof Error ? e.message : "Request failed";
     },
     [reportUnauthorized],
@@ -155,11 +164,12 @@ export default function StatusPage() {
   }
 
   const uptime = status ? formatDuration(status.started_at, now.toISOString()) : "–";
+  // One banner for both requests: when the engine is down both fail the same way.
+  const loadErrors = [...new Set([infoError, pollError].filter((m): m is string => !!m))];
 
   return (
     <div className="stack">
-      {infoError && <Banner tone="error">{infoError}</Banner>}
-      {pollError && <Banner tone="error">{pollError}</Banner>}
+      {loadErrors.length > 0 && <Banner tone="error">{loadErrors.join(" · ")}</Banner>}
 
       <section className="section" aria-labelledby="status-engine">
         <h2 className="section-title" id="status-engine">
@@ -169,12 +179,19 @@ export default function StatusPage() {
           <Fact label="Version" value={info?.version ?? "–"} />
           <Fact
             label="Source"
-            value={info ? `${info.source.type} · ${info.source.name} · ${info.source.fps} fps` : "–"}
+            value={
+              info
+                ? `${info.source.type} · ${info.source.name} · ${sourceFps(info.source.fps)} fps`
+                : "–"
+            }
           />
           <Fact label="Uptime" value={uptime} />
-          <Fact label="Source state" value={status?.source_state ?? "–"} />
+          <Fact
+            label="Source state"
+            value={status ? formatSourceState(status.source_state) : "–"}
+          />
           <Fact label="Frames processed" value={status ? status.frames_processed : "–"} />
-          <Fact label="FPS" value={status ? status.fps : "–"} />
+          <Fact label="FPS" value={status ? formatFps(status.fps) : "–"} />
         </dl>
       </section>
 

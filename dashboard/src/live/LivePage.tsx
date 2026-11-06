@@ -4,16 +4,10 @@ import type { connectLive } from "../api/live";
 import type { Truck } from "../api/types";
 import Banner from "../components/Banner";
 import TruckCard from "../components/TruckCard";
+import { formatFps, formatSourceState } from "../format";
 import { beep, loadSoundEnabled, saveSoundEnabled, unlockAudio } from "./sound";
 import StreamView from "./StreamView";
 import { useLive } from "./useLive";
-
-const SOURCE_LABEL = {
-  starting: "Starting",
-  running: "Running",
-  ended: "Ended",
-  error: "Error",
-} as const;
 
 export default function LivePage({ connect }: { connect?: typeof connectLive }) {
   const { client } = useApi();
@@ -77,12 +71,12 @@ export default function LivePage({ connect }: { connect?: typeof connectLive }) 
         </div>
         <div className="stat">
           <div className="stat-label">FPS</div>
-          <div className="stat-value">{status ? status.fps.toFixed(1) : "–"}</div>
+          <div className="stat-value">{status ? formatFps(status.fps) : "–"}</div>
         </div>
         <div className="stat">
           <div className="stat-label">Source</div>
           <div className="stat-value stat-value--text">
-            {status ? SOURCE_LABEL[status.source_state] : "–"}
+            {status ? formatSourceState(status.source_state) : "–"}
           </div>
         </div>
       </div>

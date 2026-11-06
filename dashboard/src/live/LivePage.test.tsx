@@ -53,6 +53,17 @@ test("shows stat tiles from status messages", async () => {
   expect(within(tile("FPS")).getByText("28.5")).toBeInTheDocument();
 });
 
+test("source tile labels the state, and shows an unknown one as it is", async () => {
+  const { fake } = await setup();
+  const tile = () => screen.getByText("Source").closest(".stat") as HTMLElement;
+  act(() => fake.send({ type: "status", status: { ...STATUS, source_state: "starting" } }));
+  expect(within(tile()).getByText("Starting")).toBeInTheDocument();
+  act(() =>
+    fake.send({ type: "status", status: { ...STATUS, source_state: "paused" as never } }),
+  );
+  expect(within(tile()).getByText("paused")).toBeInTheDocument();
+});
+
 test("ended video banner", async () => {
   const { fake } = await setup();
   act(() => fake.send({ type: "status", status: { ...STATUS, source_state: "ended" } }));

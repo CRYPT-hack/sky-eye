@@ -4,7 +4,7 @@ import { ApiError } from "../api/client";
 import type { Info, Runtime } from "../api/types";
 import { ApiProvider, useApi } from "../apiContext";
 import TokenPrompt from "../components/TokenPrompt";
-import { makeClient } from "../live/fakes";
+import { makeClient, STATUS } from "../live/fakes";
 import StatusPage from "./StatusPage";
 
 const INFO: Info = {
@@ -71,8 +71,52 @@ test("shows engine and detector info", async () => {
   expect(screen.getByText("NVIDIA GeForce RTX 4050 Laptop GPU")).toBeInTheDocument();
   expect(screen.getByText("yolo-trucks.pt")).toBeInTheDocument();
   expect(screen.getByText("3 min 4 s")).toBeInTheDocument();
-  expect(view.container.textContent).toContain("running");
+  expect(view.container.textContent).toContain("Running");
   expect(screen.getByText("100")).toBeInTheDocument();
+});
+
+const fact = (label: string) => screen.getByText(label, { selector: "dt" }).nextElementSibling;
+
+test("numbers are rounded like the live page, states labelled like it", async () => {
+  const { c } = setup({ info: { ...INFO, source: { ...INFO.source, fps: 30000 / 1001 } } });
+  c.getStatus.mockResolvedValue({ ...STATUS, fps: 24.5678, source_state: "running" });
+  await flush(2000); // the next poll
+  expect(fact("FPS")).toHaveTextContent(/^24\.6$/);
+  expect(fact("Source")).toHaveTextContent("file · demo.mp4 · 29.97 fps");
+  expect(fact("Source state")).toHaveTextContent(/^Running$/);
+  c.getStatus.mockResolvedValue({ ...STATUS, fps: 25, source_state: "paused" as never });
+  await flush(2000);
+  expect(fact("FPS")).toHaveTextContent(/^25\.0$/);
+  expect(fact("Source state")).toHaveTextContent(/^paused$/);
+});
+
+test("whole-number source fps has no decimals", async () => {
+  setup();
+  await flush();
+  expect(fact("Source")).toHaveTextContent("file · demo.mp4 · 30 fps");
+});
+
+test("network failures say the engine cannot be reached, in one banner", async () => {
+  const { c } = setup({ info: new TypeError("Failed to fetch") });
+  c.getStatus.mockRejectedValue(new TypeError("Failed to fetch"));
+  await flush(2000); // the next poll fails too
+  const alerts = screen.getAllByRole("alert");
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0]).toHaveTextContent(/^Cannot reach the engine$/);
+  c.getInfo.mockResolvedValue(INFO);
+  c.getStatus.mockResolvedValue(STATUS);
+  await flush(2000);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test("different info and poll errors still share one banner", async () => {
+  const { c } = setup({ info: new ApiError(500, "info broke") });
+  c.getStatus.mockRejectedValue(new TypeError("Failed to fetch"));
+  await flush(2000); // the next poll fails too
+  const alerts = screen.getAllByRole("alert");
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0]).toHaveTextContent("info broke");
+  expect(alerts[0]).toHaveTextContent("Cannot reach the engine");
 });
 
 test("gpu null shows CPU", async () => {
