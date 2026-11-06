@@ -1,6 +1,8 @@
 import { useEffect, type ReactNode } from "react";
 import { ApiProvider } from "./apiContext";
 import LivePage from "./live/LivePage";
+import TruckDetail from "./trucks/TruckDetail";
+import TrucksPage from "./trucks/TrucksPage";
 import { href, useRoute, type Route } from "./router";
 
 type Section = "live" | "trucks" | "status";
@@ -77,10 +79,8 @@ function pageTitle(route: Route): string {
   }
 }
 
-// Stand-ins until the real pages land (Trucks: Task 6, Status: Task 7).
-const PLACEHOLDER: Record<Exclude<Route["page"], "live">, string> = {
-  trucks: "Every saved truck will show here, with a date filter.",
-  truck: "The photos, the clip and the details of this truck will show here.",
+// Stand-in until the real page lands (Status: Task 7).
+const PLACEHOLDER = {
   status: "Engine and detector details and the detection settings will show here.",
 };
 
@@ -140,9 +140,13 @@ function Shell() {
           </div>
           {route.page === "live" ? (
             <LivePage />
+          ) : route.page === "trucks" ? (
+            <TrucksPage />
+          ) : route.page === "truck" ? (
+            <TruckDetail id={route.id} />
           ) : (
             <div className="empty">
-              <p>{PLACEHOLDER[route.page]}</p>
+              <p>{PLACEHOLDER.status}</p>
             </div>
           )}
         </div>

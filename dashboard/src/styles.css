@@ -865,3 +865,13 @@ input[type="range"] {
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------- Truck detail media ---------- */
+
+.detail-media {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-m);
+  background: #000;
+}
