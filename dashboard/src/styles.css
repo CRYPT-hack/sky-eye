@@ -875,3 +875,12 @@ input[type="range"] {
   border-radius: var(--radius-m);
   background: #000;
 }
+
+/* The close-up crop is small: scale it up in a 4:3 box so the truck is easy to see. */
+.detail-crop {
+  width: 100%;
+  max-width: 32rem;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  background: var(--sunken);
+}

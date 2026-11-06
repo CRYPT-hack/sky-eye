@@ -1,33 +1,45 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ApiError } from "../api/client";
 import type { Truck } from "../api/types";
 import { useApi } from "../apiContext";
 import Banner from "../components/Banner";
 import TruckCard from "../components/TruckCard";
 import { localDayRange } from "./dateRange";
+import { clearGallery, loadGallery, saveGallery, type DayRange } from "./galleryStore";
 
 const PAGE_SIZE = 48;
 
-interface Range {
-  from: string;
-  to: string;
+/** What the rows on screen were loaded for: the first page is fetched again only when this changes. */
+interface LoadedFor {
+  applied: DayRange;
+  authEpoch: number;
+  retry: number;
 }
 
 export default function TrucksPage() {
   const { client, authEpoch, unauthorized, reportUnauthorized } = useApi();
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [applied, setApplied] = useState<Range>({ from: "", to: "" });
-  const [trucks, setTrucks] = useState<Truck[]>([]);
-  const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(true);
+  // Coming back from a truck's detail page: show the gallery as it was left.
+  const [restored] = useState(() => loadGallery(client, authEpoch));
+  const [from, setFrom] = useState(restored?.applied.from ?? "");
+  const [to, setTo] = useState(restored?.applied.to ?? "");
+  const [applied, setApplied] = useState<DayRange>(() => restored?.applied ?? { from: "", to: "" });
+  const [trucks, setTrucks] = useState<Truck[]>(restored?.trucks ?? []);
+  const [hasMore, setHasMore] = useState(restored?.hasMore ?? false);
+  const [loading, setLoading] = useState(restored === null);
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
   const requestId = useRef(0);
-  const offsetRef = useRef(0);
+  const offsetRef = useRef(restored?.offset ?? 0);
+  const loadedFor = useRef<LoadedFor | null>(
+    restored ? { applied, authEpoch, retry } : null,
+  );
+
+  // Read by the unmount cleanup, which only sees the first render's values.
+  const latest = useRef({ client, authEpoch, applied, trucks, hasMore });
+  latest.current = { client, authEpoch, applied, trucks, hasMore };
 
   const fetchPage = useCallback(
-    async (offset: number, range: Range, append: boolean) => {
+    async (offset: number, range: DayRange, append: boolean, key?: LoadedFor) => {
       const id = ++requestId.current;
       setLoading(true);
       setFailed(false);
@@ -39,6 +51,7 @@ export default function TrucksPage() {
         });
         if (id !== requestId.current) return;
         offsetRef.current = offset + res.trucks.length;
+        if (key) loadedFor.current = key;
         setTrucks((prev) => {
           if (!append) return res.trucks;
           // Trucks saved since the last page shift the offset: skip rows already shown.
@@ -58,13 +71,42 @@ export default function TrucksPage() {
   );
 
   useEffect(() => {
-    void fetchPage(0, applied, false);
+    const done = loadedFor.current;
+    if (done && done.applied === applied && done.authEpoch === authEpoch && done.retry === retry) {
+      return; // restored, or already loaded (a StrictMode replay)
+    }
+    void fetchPage(0, applied, false, { applied, authEpoch, retry });
     return () => {
       requestId.current++;
     };
   }, [fetchPage, applied, authEpoch, retry]);
 
+  // A layout effect: its cleanup runs before the gallery leaves the DOM, while
+  // window.scrollY is still the gallery's scroll position.
+  useLayoutEffect(() => {
+    if (restored) window.scrollTo(0, restored.scrollY);
+    return () => {
+      requestId.current++; // drop a "Load more" still in flight
+      const cur = latest.current;
+      const done = loadedFor.current;
+      if (done && done.applied === cur.applied && done.authEpoch === cur.authEpoch) {
+        saveGallery(cur.client, cur.authEpoch, {
+          applied: cur.applied,
+          trucks: cur.trucks,
+          offset: offsetRef.current,
+          hasMore: cur.hasMore,
+          scrollY: window.scrollY,
+        });
+      } else {
+        clearGallery(); // left before the rows matched the filter: load afresh next time
+      }
+    };
+    // Mount and unmount only; everything else is read through refs.
+  }, []);
+
   const clear = () => {
+    clearGallery();
+    loadedFor.current = null;
     setFrom("");
     setTo("");
     setApplied({ from: "", to: "" });

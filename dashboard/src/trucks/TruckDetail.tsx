@@ -6,9 +6,20 @@ import Banner from "../components/Banner";
 import { formatDuration, formatScore, formatTime } from "../format";
 import { href } from "../router";
 
+/** A truck seen this recently may still have its clip encoding (up to about a minute). */
+const CLIP_WAIT_MS = 120_000;
+const CLIP_POLL_MS = 3000;
+
+/** No clip yet, but last seen under CLIP_WAIT_MS ago: the engine may still be saving it. */
+function clipPending(truck: Truck, now: number): boolean {
+  if (truck.clip_url !== null) return false;
+  const lastSeen = Date.parse(truck.last_seen);
+  return Number.isFinite(lastSeen) && now - lastSeen < CLIP_WAIT_MS;
+}
+
 type State =
   | { kind: "loading" }
-  | { kind: "ok"; truck: Truck }
+  | { kind: "ok"; truck: Truck; clipPending: boolean }
   | { kind: "notfound" }
   | { kind: "error" };
 
@@ -17,22 +28,44 @@ export default function TruckDetail({ id }: { id: number }) {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [retry, setRetry] = useState(0);
 
+  // Loads the truck; while its clip may still be saving, fetches it again every
+  // CLIP_POLL_MS (which also refreshes last_seen and the duration).
   useEffect(() => {
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let shown: Truck | null = null;
     setState({ kind: "loading" });
-    client
-      .getTruck(id)
-      .then((truck) => {
-        if (!cancelled) setState({ kind: "ok", truck });
-      })
-      .catch((e: unknown) => {
-        if (cancelled) return;
-        if (e instanceof ApiError && e.status === 401) reportUnauthorized();
-        else if (e instanceof ApiError && e.status === 404) setState({ kind: "notfound" });
-        else setState({ kind: "error" });
-      });
+
+    const load = () => {
+      client
+        .getTruck(id)
+        .then((truck) => {
+          if (cancelled) return;
+          shown = truck;
+          const pending = clipPending(truck, Date.now());
+          setState({ kind: "ok", truck, clipPending: pending });
+          if (pending) timer = setTimeout(load, CLIP_POLL_MS);
+        })
+        .catch((e: unknown) => {
+          if (cancelled) return;
+          if (e instanceof ApiError && e.status === 401) {
+            reportUnauthorized(); // a saved token starts a new auth epoch: this effect runs again
+            return;
+          }
+          if (shown !== null) {
+            // A failed re-check keeps the truck on screen and tries again.
+            if (clipPending(shown, Date.now())) timer = setTimeout(load, CLIP_POLL_MS);
+            else setState({ kind: "ok", truck: shown, clipPending: false });
+            return;
+          }
+          if (e instanceof ApiError && e.status === 404) setState({ kind: "notfound" });
+          else setState({ kind: "error" });
+        });
+    };
+    load();
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [client, id, authEpoch, retry, reportUnauthorized]);
 
@@ -80,6 +113,13 @@ export default function TruckDetail({ id }: { id: number }) {
   return (
     <div className="stack">
       {back}
+      {t.crop_url && (
+        <img
+          className="detail-media detail-crop"
+          src={client.mediaUrl(t.crop_url)}
+          alt={`Truck #${t.id} close-up`}
+        />
+      )}
       {t.snapshot_url ? (
         <img
           className="detail-media"
@@ -99,6 +139,10 @@ export default function TruckDetail({ id }: { id: number }) {
           preload="metadata"
           src={client.mediaUrl(t.clip_url)}
         />
+      ) : state.clipPending ? (
+        <p className="muted" role="status">
+          Clip is being saved…
+        </p>
       ) : (
         <p className="muted">No clip saved for this truck</p>
       )}

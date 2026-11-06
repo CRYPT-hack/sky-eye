@@ -1,8 +1,9 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test, vi } from "vitest";
+import { StrictMode } from "react";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { ApiProvider, useApi } from "../apiContext";
-import { ApiError } from "../api/client";
+import { ApiError, type ApiClient } from "../api/client";
 import { makeClient, makeTruck } from "../live/fakes";
 import type { Truck } from "../api/types";
 import TrucksPage from "./TrucksPage";
@@ -149,4 +150,151 @@ test("saving the same token again refetches each time", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Save token t" }));
   expect(await screen.findByText("Truck #4")).toBeInTheDocument();
   expect(mock).toHaveBeenCalledTimes(3);
+});
+
+describe("gallery survives a detail visit", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function Shell({ client, page }: { client: ApiClient; page: "list" | "detail" }) {
+    return (
+      <ApiProvider client={client} initialToken="t">
+        {page === "list" ? <TrucksPage /> : <p>detail page</p>}
+        <Gate />
+      </ApiProvider>
+    );
+  }
+
+  function filtered() {
+    const client = makeClient();
+    (client.listTrucks as ReturnType<typeof vi.fn>).mockImplementation(
+      async (q: { offset?: number }) => ({
+        trucks: q.offset ? many(49, 48) : many(1, 48),
+        limit: 48,
+        offset: q.offset ?? 0,
+      }),
+    );
+    return client;
+  }
+
+  const cards = () => screen.queryAllByText(/^Truck #\d+$/);
+
+  test("keeps the filter, every loaded page and the scroll position", async () => {
+    const client = filtered();
+    const mock = client.listTrucks as ReturnType<typeof vi.fn>;
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    const view = render(<Shell client={client} page="list" />);
+    await waitFor(() => expect(cards()).toHaveLength(48));
+    await userEvent.type(screen.getByLabelText("From"), "2026-11-06");
+    await userEvent.type(screen.getByLabelText("To"), "2026-11-06");
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(mock).toHaveBeenCalledTimes(2));
+    await userEvent.click(await screen.findByRole("button", { name: "Load more" }));
+    await waitFor(() => expect(cards()).toHaveLength(96));
+    expect(mock).toHaveBeenCalledTimes(3);
+
+    vi.spyOn(window, "scrollY", "get").mockReturnValue(1234);
+    view.rerender(<Shell client={client} page="detail" />); // opened a truck
+    expect(cards()).toHaveLength(0);
+    view.rerender(<Shell client={client} page="list" />); // and came back
+
+    expect(screen.getByLabelText("From")).toHaveValue("2026-11-06");
+    expect(screen.getByLabelText("To")).toHaveValue("2026-11-06");
+    expect(cards()).toHaveLength(96);
+    expect(mock).toHaveBeenCalledTimes(3); // nothing fetched again
+    expect(scrollTo).toHaveBeenLastCalledWith(0, 1234);
+    expect(screen.queryByText("No trucks saved for this range")).not.toBeInTheDocument();
+
+    // and Load more continues after the restored rows
+    mock.mockResolvedValueOnce({ trucks: many(97, 3), limit: 48, offset: 96 });
+    await userEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(() => expect(cards()).toHaveLength(99));
+    expect(mock).toHaveBeenLastCalledWith({
+      limit: 48,
+      offset: 96,
+      from: "2026-11-05T18:30:00.000Z",
+      to: "2026-11-06T18:30:00.000Z",
+    });
+  });
+
+  test("a new auth epoch resets the saved gallery", async () => {
+    const client = filtered();
+    const mock = client.listTrucks as ReturnType<typeof vi.fn>;
+    vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    const view = render(<Shell client={client} page="list" />);
+    await waitFor(() => expect(cards()).toHaveLength(48));
+    await userEvent.type(screen.getByLabelText("From"), "2026-11-06");
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(mock).toHaveBeenCalledTimes(2));
+    view.rerender(<Shell client={client} page="detail" />);
+    await userEvent.click(screen.getByRole("button", { name: "Save token t" }));
+    view.rerender(<Shell client={client} page="list" />);
+    await waitFor(() => expect(mock).toHaveBeenCalledTimes(3));
+    expect(mock).toHaveBeenLastCalledWith({ limit: 48, offset: 0 });
+    expect(screen.getByLabelText("From")).toHaveValue("");
+    await waitFor(() => expect(cards()).toHaveLength(48));
+  });
+
+  test("a new auth epoch while the gallery is open refetches it", async () => {
+    const client = filtered();
+    const mock = client.listTrucks as ReturnType<typeof vi.fn>;
+    render(<Shell client={client} page="list" />);
+    await waitFor(() => expect(cards()).toHaveLength(48));
+    await userEvent.click(screen.getByRole("button", { name: "Save token t" }));
+    await waitFor(() => expect(mock).toHaveBeenCalledTimes(2));
+  });
+
+  test("Clear resets the saved gallery too", async () => {
+    const client = filtered();
+    const mock = client.listTrucks as ReturnType<typeof vi.fn>;
+    vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    const view = render(<Shell client={client} page="list" />);
+    await waitFor(() => expect(cards()).toHaveLength(48));
+    await userEvent.type(screen.getByLabelText("From"), "2026-11-06");
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(mock).toHaveBeenCalledTimes(2));
+    await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(mock).toHaveBeenCalledTimes(3));
+    expect(mock).toHaveBeenLastCalledWith({ limit: 48, offset: 0 });
+    await waitFor(() => expect(cards()).toHaveLength(48));
+    view.rerender(<Shell client={client} page="detail" />);
+    view.rerender(<Shell client={client} page="list" />);
+    expect(screen.getByLabelText("From")).toHaveValue("");
+    expect(cards()).toHaveLength(48);
+    expect(mock).toHaveBeenCalledTimes(3);
+  });
+
+  test("a gallery left while still loading is fetched again", async () => {
+    const client = makeClient();
+    const mock = client.listTrucks as ReturnType<typeof vi.fn>;
+    mock.mockImplementationOnce(() => new Promise(() => {}));
+    mock.mockResolvedValue({ trucks: [makeTruck(9)], limit: 48, offset: 0 });
+    const view = render(<Shell client={client} page="list" />);
+    view.rerender(<Shell client={client} page="detail" />);
+    view.rerender(<Shell client={client} page="list" />);
+    expect(await screen.findByText("Truck #9")).toBeInTheDocument();
+    expect(mock).toHaveBeenCalledTimes(2);
+  });
+});
+
+test("restores in StrictMode without fetching twice", async () => {
+  const client = makeClient();
+  const mock = client.listTrucks as ReturnType<typeof vi.fn>;
+  mock.mockResolvedValue({ trucks: many(1, 3), limit: 48, offset: 0 });
+  vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+  const tree = (page: "list" | "detail") => (
+    <StrictMode>
+      <ApiProvider client={client} initialToken="t">
+        {page === "list" ? <TrucksPage /> : <p>detail page</p>}
+      </ApiProvider>
+    </StrictMode>
+  );
+  const view = render(tree("list"));
+  await waitFor(() => expect(screen.getAllByText(/^Truck #\d+$/)).toHaveLength(3));
+  const calls = mock.mock.calls.length;
+  view.rerender(tree("detail"));
+  view.rerender(tree("list"));
+  await new Promise((r) => setTimeout(r, 20));
+  expect(screen.getAllByText(/^Truck #\d+$/)).toHaveLength(3);
+  expect(mock.mock.calls).toHaveLength(calls);
+  vi.restoreAllMocks();
 });
