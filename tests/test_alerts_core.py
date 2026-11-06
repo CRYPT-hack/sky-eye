@@ -134,9 +134,15 @@ def test_burst_is_grouped_per_cooldown(running, clock):
 def test_cooldown_is_per_channel(running, clock):
     desk, tele = Fake("desktop"), Fake("telegram")
     on = {"desktop": False, "telegram": True}
-    bus, d = running([desk, tele], enabled=lambda n: on[n], clock=clock)
+    seen: list[str] = []
+
+    def enabled(name: str) -> bool:
+        seen.append(name)
+        return on[name]
+
+    bus, d = running([desk, tele], enabled=enabled, clock=clock)
     bus.publish(new(1))
-    assert wait_until(lambda: ids(tele) == [[1]])
+    assert wait_until(lambda: ids(tele) == [[1]] and seen.count("desktop") == 1)
     on["desktop"] = True
     bus.publish(new(2))
     assert wait_until(lambda: ids(desk) == [[2]] and pending(d, 1) == 1)
@@ -217,10 +223,14 @@ def test_bus_overflow_warns_with_count_rate_limited(running, clock, caplog):
     orig = ch.offer
     entered, gate = threading.Event(), threading.Event()
 
+    calls = {"n": 0, "done": 0}
+
     def blocking_offer(item):
+        calls["n"] += 1
         entered.set()
         gate.wait(5)
         orig(item)
+        calls["done"] += 1
 
     ch.offer = blocking_offer
     # stall the reader inside offer, then burst with no sleeps (sub queue holds 100)
@@ -232,7 +242,8 @@ def test_bus_overflow_warns_with_count_rate_limited(running, clock, caplog):
     assert wait_until(lambda: len(drop_msgs(caplog)) == 1)
     assert drop_msgs(caplog) == ["alert subscription full; 10 events dropped"]
     # second burst inside the 5 s window: no new warning until the window passes
-    assert wait_until(lambda: d._sub.qsize() == 0)
+    # every event of burst 1 (1 held + 100 queued) has passed through offer
+    assert wait_until(lambda: d._sub.qsize() == 0 and calls["done"] == 101)
     gate.clear()
     entered.clear()
     bus.publish(new(200))
@@ -263,6 +274,36 @@ def test_pile_up_during_slow_delivery_is_grouped(running, clock):
         gate.set()
     assert wait_until(lambda: len(n.batches) == 2)
     assert ids(n) == [[0], [1, 2, 3, 4, 5]]
+
+
+@pytest.mark.parametrize("arrive_at", [2.0, 15.0])
+def test_trucks_during_stuck_send_go_out_as_one_batch(running, clock, arrive_at):
+    gate = threading.Event()
+    n = Fake("desktop", block=gate)
+    bus, d = running([n], clock=clock)  # cooldown 10 s
+    try:
+        bus.publish(new(0))
+        assert wait_until(lambda: n.attempts == 1)  # send stuck, last_sent = t0
+        clock.advance(arrive_at)
+        for i in range(1, 6):
+            bus.publish(new(i))
+        assert wait_until(lambda: d._channels[0].inbox.qsize() == 5)
+        clock.advance(30 - arrive_at)  # send stays stuck for 30 s in total
+    finally:
+        gate.set()
+    assert wait_until(lambda: len(n.batches) == 2)
+    assert ids(n) == [[0], [1, 2, 3, 4, 5]]
+    assert pending(d) == 0
+
+
+def test_truck_after_idle_period_goes_out_immediately(running, clock):
+    n = Fake("desktop")
+    bus, d = running([n], clock=clock)
+    bus.publish(new(1))
+    assert wait_until(lambda: ids(n) == [[1]])
+    clock.advance(60)
+    bus.publish(new(2))
+    assert wait_until(lambda: ids(n) == [[1], [2]])
 
 
 def test_send_test_ignores_cooldown(running, clock):

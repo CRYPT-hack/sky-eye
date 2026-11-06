@@ -53,6 +53,7 @@ class _Channel:
         self.thread: threading.Thread | None = None
         # worker-thread-only state
         self.last_sent: float | None = None
+        self.idle_since: float | None = None  # when the last delivery ended
         self.pending: list[dict] = []
         self.deadline = 0.0
 
@@ -200,11 +201,12 @@ class AlertDispatcher:
             self._flush(ch, stop)
 
     def _on_truck(self, ch: _Channel, stamp: float, truck: dict, stop: threading.Event) -> None:
-        """Group by *arrival* time (stamp), so trucks that piled up behind a slow send
-        stay in one batch, while a truck arriving after an idle cooldown goes out alone."""
-        if not ch.pending and (
-            ch.last_sent is None or stamp - ch.last_sent >= self._cooldown
-        ):
+        """Group by *arrival* time (stamp). A truck goes out alone only if it arrived after
+        the last delivery ended (channel idle) and the cooldown has elapsed; anything that
+        arrived while a send was in progress joins the pile-up and leaves as one batch."""
+        idle = ch.idle_since is None or stamp >= ch.idle_since
+        cooled = ch.last_sent is None or stamp - ch.last_sent >= self._cooldown
+        if not ch.pending and idle and cooled:
             ch.pending.append(truck)
             self._flush(ch, stop)
             return
@@ -213,8 +215,9 @@ class AlertDispatcher:
             del ch.pending[0]
             log.warning("alert queue full for channel %s; dropped oldest", ch.name)
         if len(ch.pending) == 1:
-            assert ch.last_sent is not None
-            ch.deadline = ch.last_sent + self._cooldown
+            ch.deadline = (
+                ch.last_sent + self._cooldown if ch.last_sent is not None else self._clock()
+            )
 
     def _flush(self, ch: _Channel, stop: threading.Event) -> None:
         trucks, ch.pending = tuple(ch.pending), []
@@ -224,6 +227,14 @@ class AlertDispatcher:
         self._deliver(ch, AlertBatch(trucks), stop)
 
     def _deliver(self, ch: _Channel, batch: AlertBatch, stop: threading.Event) -> None:
+        try:
+            self._deliver_attempts(ch, batch, stop)
+        finally:
+            ch.idle_since = self._clock()
+
+    def _deliver_attempts(
+        self, ch: _Channel, batch: AlertBatch, stop: threading.Event
+    ) -> None:
         attempts = 1 + len(self._retries)
         for i in range(attempts):
             if stop.is_set():
