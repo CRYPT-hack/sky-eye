@@ -412,3 +412,62 @@ def test_uvicorn_logs_reach_rotating_file(tmp_path):
                 root.removeHandler(handler)
                 handler.close()
         rig.repo.close()
+
+
+@pytest.mark.parametrize(
+    ("source_yaml", "secret", "kind", "name"),
+    [
+        (
+            "  type: stream\n  url: rtsp://pilot:s3cret@10.0.0.5:8554/live?token=t0ken\n",
+            ["s3cret", "t0ken"],
+            "stream",
+            "rtsp://***@10.0.0.5:8554/live?***",
+        ),
+        (
+            "  type: go2rtc\n  go2rtc:\n    name: drone\n"
+            "    rtsp_base: rtsp://admin:hunter2@127.0.0.1:8554\n",
+            ["hunter2"],
+            "go2rtc",
+            "go2rtc:drone",
+        ),
+    ],
+)
+def test_stream_credentials_not_stored_or_served(tmp_path, monkeypatch, source_yaml, secret, kind, name):
+    import sqlite3
+
+    import numpy as np
+    from fastapi.testclient import TestClient
+
+    from engine.api.app import create_app
+    from engine.sources import StreamSource
+
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    urls = []
+
+    def fake_source(scfg):  # no network: one frame from a fake opener
+        url = scfg.stream_url()
+        urls.append(url)
+        return StreamSource(url, opener=lambda u, o: iter([np.zeros((24, 32, 3), np.uint8)]))
+
+    monkeypatch.setattr(app_mod, "build_source", fake_source)
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        f"source:\n{source_yaml}detector:\n  device: cpu\nevidence:\n  data_dir: data\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_path)
+    ctx = build_engine(cfg)
+    try:
+        assert any(s in urls[0] for s in secret)  # the source itself gets the real URL
+        assert ctx.info["source"]["type"] == kind and ctx.info["source"]["name"] == name
+        body = TestClient(create_app(ctx)).get("/api/info").text
+    finally:
+        ctx.pipeline.stop()
+        ctx.repo.close()
+    with sqlite3.connect(cfg.evidence.data_dir / "sky-eye.db") as db:
+        label, config_json = db.execute("SELECT source, config_json FROM runs").fetchone()
+    assert label == name
+    assert '"type":"' + kind + '"' in config_json.replace(" ", "")
+    for s in secret:
+        assert s not in config_json and s not in body and s not in label
+    assert name in body

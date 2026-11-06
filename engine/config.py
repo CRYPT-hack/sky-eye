@@ -19,7 +19,7 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-STREAM_SCHEMES = ("rtsp", "rtsps", "rtmp", "rtmps", "srt", "udp", "http", "https")
+STREAM_SCHEMES = ("rtsp", "rtsps", "rtmp", "rtmps", "udp", "http", "https")
 _GO2RTC_SCHEMES = ("rtsp", "rtsps")
 
 
@@ -32,8 +32,19 @@ def _url_problem(url: str, schemes: tuple[str, ...]) -> str | None:
         return "not a valid URL"
     if "://" not in url or not parts.scheme:
         return f"needs a scheme, one of: {', '.join(schemes)} (e.g. {schemes[0]}://host/path)"
+    if parts.scheme == "srt":  # the PyAV wheels are built without libsrt
+        return "SRT is not supported directly; relay it through go2rtc (type: go2rtc)"
     if parts.scheme not in schemes:
         return f"unsupported scheme {parts.scheme!r}; use one of: {', '.join(schemes)}"
+    # urlsplit ends the authority at the first / ? or #; an "@" after that means
+    # the user name or password holds one of them raw, and FFmpeg would split
+    # the URL in the wrong place (and could log the password as the host)
+    after_authority = url.partition("://")[2][len(parts.netloc):]
+    if "@" in after_authority:
+        return (
+            "the user name or password contains a reserved character (/ ? #); "
+            "percent-encode it: / as %2F, ? as %3F, # as %23"
+        )
     if not parts.netloc:
         return "needs a host, e.g. rtsp://192.168.1.10:8554/live"
     return None

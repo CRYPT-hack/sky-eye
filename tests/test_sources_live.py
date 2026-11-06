@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from engine.config import ConfigError, SourceConfig, load_config
+from engine.core import DEFAULT_FPS
 from engine.sources import CaptureSource, StreamSource, build_source
 from engine.sources.backoff import Backoff
 from tests.conftest import make_video
@@ -316,19 +317,128 @@ def test_pyav_opener_yields_none_for_non_video_packets(tmp_path):
     assert sum(item is None for item in items[last_image + 1 :]) >= 10
 
 
-def test_stream_logs_hide_credentials(sources, caplog):
-    url = "rtsp://pilot:s3cret@cam/live?token=abc"
+CREDENTIAL_URLS = [
+    # (url, the secrets it holds)
+    ("rtsp://pilot:s3cret@cam/live?token=abc", ["s3cret", "abc"]),
+    ("rtsp://u:pa#ss@cam/live", ["pa#ss"]),
+    ("rtsp://u:pa/ss@cam/live", ["pa/ss"]),
+    ("rtsp://u:pa?ss@cam/live", ["pa?ss"]),
+    ("rtsp://u:pa@ss@cam/live", ["pa@ss"]),
+    ("rtsp://u:pa\\ss@cam/live", ["pa\\ss"]),
+    ("rtsp://u:pa'ss@cam/live", ["pa'ss"]),
+    ('rtsp://u:pa"ss@cam/live', ['pa"ss']),
+]
 
-    def refuse(u, opts):
-        raise OSError(f"cannot connect to {u!r}")
+
+@pytest.mark.parametrize(("url", "secrets"), CREDENTIAL_URLS)
+def test_stream_logs_hide_credentials(sources, caplog, url, secrets):
+    def refuse(u, opts):  # like PyAV: the repr of the URL in the message
+        raise OSError(f"[Errno 5] cannot open {u!r}; also tried {u}")
 
     src = StreamSource(url, opener=refuse, sleep=lambda d: time.sleep(0.01))
     sources.append(src)
     with caplog.at_level("INFO", logger="engine.sources.stream"):
         src.open()
         assert _wait_until(lambda: len(caplog.records) >= 2)
-    assert "rtsp://***@cam/live?***" in caplog.text
-    assert "s3cret" not in caplog.text and "abc" not in caplog.text
+    text = caplog.text
+    assert "rtsp://***@cam/live" in text
+    for secret in secrets:
+        assert secret not in text and repr(secret)[1:-1] not in text
+
+
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        ("rtsp://u:pa?ss@h/live", "rtsp://***@h/live"),
+        ("rtsp://u:pa#ss@h/live", "rtsp://***@h/live"),
+        ("rtsp://u:pa/ss@h/live", "rtsp://***@h/live"),
+        ("rtsp://u:p@ss@h:8554/live?x=1", "rtsp://***@h:8554/live?***"),
+        ("rtmp://h/live/key?secret=1", "rtmp://h/live/key?***"),
+        ("rtsp://cam:8554/live", "rtsp://cam:8554/live"),
+        ("udp://@239.0.0.1:1234", "udp://@239.0.0.1:1234"),  # no userinfo
+        # an exception quoting repr(url) of a password with a backslash and a quote
+        (f"error: {'rtsp://u:x' + chr(92) + chr(39) + 'y@h/a'!r} failed",
+         "error: \"rtsp://***@h/a\" failed"),
+    ],
+)
+def test_redact_url(raw, shown):
+    from engine.sources.stream import redact_url
+
+    assert redact_url(raw) == shown
+
+
+def test_stream_state_reconnecting_until_first_frame(sources):
+    gate = threading.Event()
+
+    class GatedStream(FakeStream):
+        def __iter__(self):
+            while not gate.is_set() and not self.closed:
+                time.sleep(0.002)
+                yield None
+            yield from super().__iter__()
+
+    stream = GatedStream([_img(9)])
+    src = StreamSource("rtsp://cam/live", opener=ScriptedOpener(stream))
+    sources.append(src)
+    assert src.state == "reconnecting"
+    src.open()  # connected, but no picture yet
+    assert src.state == "reconnecting"
+    time.sleep(0.05)
+    assert src.state == "reconnecting" and src.read() is None
+    gate.set()
+    assert stream.drained.wait(WAIT_S)
+    assert src.state == "running"
+    frame = src.read()
+    assert frame is not None and int(frame.image[0, 0, 0]) == 9
+
+
+def test_stream_first_frame_gets_open_timeout_then_read_timeout(sources):
+    # a long-GOP camera: the first picture may take up to max(read, open) timeout
+    clock = FakeClock(100.0)
+    reconnects: list[float] = []
+
+    class Scripted(FakeStream):
+        def __init__(self, script):
+            super().__init__([])
+            self.script = script
+
+        def __iter__(self):
+            for item in self.script:
+                if item is None:
+                    clock.t += 1.0
+                yield item
+            yield from super().__iter__()
+
+    first = Scripted([None] * 5 + [_img(1)] + [None] * 3)  # 5 s to the first frame, then stalls
+    second = FakeStream([_img(2)])
+    opener = ScriptedOpener(first, second)
+    src = StreamSource(
+        "rtsp://cam/live",
+        open_timeout_s=6.0,
+        read_timeout_s=2.0,
+        opener=opener,
+        clock=clock,
+        sleep=lambda d: reconnects.append(clock.t),
+    )
+    sources.append(src)
+    src.open()
+    assert second.drained.wait(WAIT_S)
+    assert len(opener.calls) == 2
+    # no reconnect during the 5 s wait for the first frame (< 6 s), but one
+    # 3 s into the stall after it (> 2 s)
+    assert reconnects == [108.0]
+
+
+@pytest.mark.parametrize(
+    ("reported", "expected"),
+    [(25.0, 25.0), (1.0, 1.0), (240.0, 240.0), (0.5, DEFAULT_FPS), (1000.0, DEFAULT_FPS),
+     (90000.0, DEFAULT_FPS), (float("nan"), DEFAULT_FPS), (None, DEFAULT_FPS)],
+)
+def test_stream_fps_clamped(sources, reported, expected):
+    src = StreamSource("rtsp://cam/live", opener=ScriptedOpener(FakeStream([], fps=reported)))
+    sources.append(src)
+    src.open()
+    assert src.fps == expected
 
 
 class FakeDevice:

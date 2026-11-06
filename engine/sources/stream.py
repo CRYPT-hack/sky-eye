@@ -1,9 +1,10 @@
-"""Live network video (RTSP, RTMP, SRT, UDP, HTTP) decoded by PyAV on a background thread."""
+"""Live network video (RTSP, RTMP, UDP, HTTP) decoded by PyAV on a background thread."""
 from __future__ import annotations
 
 import functools
 import logging
 import math
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -28,9 +29,10 @@ LOW_LATENCY_OPTIONS: dict[str, str] = {
 _RTSP_SCHEMES = frozenset({"rtsp", "rtsps"})
 # These get FFmpeg's generic URL read/write timeout ("rw_timeout"). Not "timeout":
 # for rtmp that option means "listen for an incoming connection".
-_RW_TIMEOUT_SCHEMES = frozenset({"rtmp", "rtmps", "srt", "udp", "http", "https"})
+_RW_TIMEOUT_SCHEMES = frozenset({"rtmp", "rtmps", "udp", "http", "https"})
 _CLOSE_JOIN_S = 1.5  # close() waits this long for the reader (it must return within 2 s)
 _OPEN_WAIT_MARGIN_S = 1.0  # open() waits for the first attempt: open timeout + this
+_MIN_FPS, _MAX_FPS = 1.0, 240.0  # a stream rate outside this is not trusted
 
 
 def _scheme(url: str) -> str:
@@ -53,17 +55,24 @@ def stream_options(url: str, read_timeout_s: float) -> dict[str, str]:
     return opts
 
 
-def redact_url(url: str) -> str:
-    """`url` without user:password and query values (they may hold secrets), for logs."""
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return "<invalid url>"
-    netloc = parts.netloc
-    if "@" in netloc:
-        netloc = "***@" + netloc.rpartition("@")[2]
-    query = "***" if parts.query else ""
-    return parts._replace(netloc=netloc, query=query).geturl()
+_URL_START = r"[A-Za-z][A-Za-z0-9+.\-]*://"
+# scheme:// up to the LAST "@" on the line: a password may hold any character
+# (#, /, ?, @, quotes, backslashes), so the raw text is matched, not urlsplit's view
+_USERINFO_RE = re.compile(rf"({_URL_START})[^\n]+@")
+# a query string after scheme://host/path, up to a quote or whitespace
+_QUERY_RE = re.compile(rf"({_URL_START}[^\s'\"?]*)\?[^\s'\"]*")
+
+
+def redact_url(text: str) -> str:
+    """`text` (a URL, or a message quoting URLs) with any user:password and query
+    string replaced by ***, for logs, the database and the API."""
+    text = _USERINFO_RE.sub(r"\1***@", text)
+    return _QUERY_RE.sub(r"\1?***", text)
+
+
+def _describe(exc: BaseException) -> str:
+    """An exception for the log, with URLs redacted (PyAV quotes the URL)."""
+    return redact_url(f"{type(exc).__name__}: {exc}")
 
 
 class _PyAVStream:
@@ -122,17 +131,21 @@ def _valid_fps(value: Any) -> float | None:
         fps = float(value)
     except (TypeError, ValueError):
         return None
-    return fps if fps > 0 and math.isfinite(fps) else None
+    return fps if math.isfinite(fps) and _MIN_FPS <= fps <= _MAX_FPS else None
 
 
 class StreamSource:
     """A live network stream. A background thread connects, decodes and keeps
     only the newest frame; read() hands it out once and never blocks.
 
+    state is "reconnecting" from open() until a frame arrives, then "running".
     The source never ends: on a connect failure, a read error, the stream
-    ending or no frame for `read_timeout_s`, state turns "reconnecting" and the
-    thread retries after 1, 2, 4 ... 30 s; the first good frame makes it
-    "running" again and resets the delay.
+    ending or no frame for `read_timeout_s` (for the first frame of a
+    connection: max(read_timeout_s, open_timeout_s), so a long-GOP camera can
+    reach its first keyframe), state turns "reconnecting" again and the thread
+    retries after 1, 2, 4 ... 30 s; the first good frame makes it "running" and
+    resets the delay. fps is the stream's rate when it lies in 1..240, else
+    DEFAULT_FPS.
 
     `opener(url, options)` connects and returns an iterable of BGR arrays (None =
     no picture yet) or raises; an optional `fps` attribute gives the stream rate
@@ -157,6 +170,7 @@ class StreamSource:
         self._url = url
         self._open_timeout_s = open_timeout_s
         self._read_timeout_s = read_timeout_s
+        self._first_frame_timeout_s = max(read_timeout_s, open_timeout_s)
         self._options = stream_options(url, read_timeout_s)
         self._opener = opener or functools.partial(
             open_pyav, open_timeout_s=open_timeout_s, read_timeout_s=read_timeout_s
@@ -172,22 +186,23 @@ class StreamSource:
         # guarded by _lock
         self._lock = threading.Lock()
         self._latest: tuple[np.ndarray, float, datetime] | None = None
-        self._state = "running"
+        self._state = "reconnecting"  # until the first frame
         self._size: tuple[int, int] | None = None
 
     # ----- VideoSource -----
 
     def open(self) -> None:
         """Start the reader and wait (at most the open timeout + 1 s) for its first
-        connection attempt, so fps is the stream's own. An unreachable stream
-        does not raise: the source is left "reconnecting"."""
+        connection attempt, so fps is the stream's own. State stays
+        "reconnecting" until the first frame; an unreachable stream does not
+        raise."""
         if self._thread is not None:
             raise RuntimeError("stream source is already open")
         self._stop = stop = threading.Event()
         attempted = threading.Event()
         with self._lock:
             self._latest = None
-            self._state = "running"
+            self._state = "reconnecting"
         self._index = 0
         self._backoff.reset()
         self._t0 = self._clock()
@@ -254,7 +269,7 @@ class StreamSource:
                 self._read_stream(stop, attempted)
                 reason = "the stream ended"
             except Exception as exc:  # noqa: BLE001 - any failure means: reconnect
-                reason = f"{type(exc).__name__}: {exc}".replace(self._url, shown)
+                reason = _describe(exc)
             if stop.is_set():
                 break
             with self._lock:
@@ -281,19 +296,20 @@ class StreamSource:
         try:
             items = iter(stream)
             fps = _valid_fps(getattr(stream, "fps", None))
-            if fps is not None:
-                self._fps = fps
+            self._fps = DEFAULT_FPS if fps is None else fps
             attempted.set()
             last_frame = self._clock()
+            limit = self._first_frame_timeout_s  # then read_timeout_s
             for image in items:
                 if stop.is_set():
                     return
                 now = self._clock()
                 if image is None:
-                    if now - last_frame > self._read_timeout_s:
-                        raise TimeoutError(f"no video frame for {self._read_timeout_s:g} s")
+                    if now - last_frame > limit:
+                        raise TimeoutError(f"no video frame for {limit:g} s")
                     continue
                 last_frame = now
+                limit = self._read_timeout_s
                 self._publish(image, now, stop)
         finally:
             # the iterator first (a PyAV demux generator), then the container
@@ -303,8 +319,8 @@ class StreamSource:
                 if callable(close):
                     try:
                         close()
-                    except Exception:  # noqa: BLE001 - already reconnecting or stopping
-                        log.debug("closing the video stream failed", exc_info=True)
+                    except Exception as exc:  # noqa: BLE001 - already reconnecting or stopping
+                        log.debug("closing the video stream failed: %s", _describe(exc))
 
     def _publish(self, image: np.ndarray, now: float, stop: threading.Event) -> None:
         height, width = image.shape[:2]
