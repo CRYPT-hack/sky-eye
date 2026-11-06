@@ -119,7 +119,16 @@ class EventManager:
                     continue
                 state.last_seen = frame.wall_time
                 if frame.ts - state.first_ts <= self._window and score > state.best_score:
-                    save_snapshot(frame, track.detection.box, state.full_path, state.crop_path)
+                    try:
+                        save_snapshot(
+                            frame, track.detection.box, state.full_path, state.crop_path
+                        )
+                    except OSError as exc:
+                        # the earlier snapshot stays; a later, better frame may still win
+                        log.warning(
+                            "could not update the snapshot of truck %d: %s", state.truck_id, exc
+                        )
+                        continue
                     state.best_score = score
                     self._repo.update_truck(state.truck_id, best_score=score)
                     if state.truck_id not in improved:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
+import logging
 import signal
 import socket
 import threading
@@ -144,6 +146,35 @@ def test_root_without_dashboard_explains_build(tmp_path):
         rig.repo.close()
 
 
+HINT = "not built - run: cd dashboard && npm ci && npm run build, then reload this page"
+
+
+def test_dashboard_built_while_running_is_served_without_restart(tmp_path, caplog):
+    rig = make_rig(tmp_path / "data", dashboard_dir=tmp_path / "dist dir")
+    try:
+        with caplog.at_level(logging.WARNING, logger="engine.api.app"):
+            app = create_app(rig.ctx)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("index.html" in m and "npm run build" in m for m in warnings)
+        with TestClient(app) as c:
+            r = c.get("/")
+            assert r.status_code == 200 and r.json()["dashboard"] == HINT
+            missing = c.get("/assets/app.js")
+            assert missing.status_code == 404 and missing.json()["api"] == 1
+            assert c.get("/api/info").json()["info"]["dashboard"] is False
+
+            make_dist(tmp_path)  # `npm run build` finishes while the engine runs
+
+            r = c.get("/")
+            assert r.status_code == 200
+            assert r.headers["content-type"].startswith("text/html")
+            assert '<div id="root">' in r.text
+            assert c.get("/assets/app.js").status_code == 200
+            assert c.get("/api/info").json()["info"]["dashboard"] is True
+    finally:
+        rig.repo.close()
+
+
 def test_info_shape(client):
     body = client.get("/api/info").json()
     assert body["api"] == 1
@@ -224,6 +255,24 @@ def test_runtime_put_and_get(client, rig):
     assert client.put("/api/config/runtime", json={"confidence": 2}).status_code == 422
     assert client.put("/api/config/runtime", json={"bogus": 1}).status_code == 422
     assert client.put("/api/config/runtime", json=[1]).status_code == 422
+    assert rig.ctx.runtime.confidence == 0.6
+
+
+def test_runtime_put_requires_json_content_type(client, rig):
+    # A cross-site form or text/plain fetch cannot send application/json without
+    # a CORS preflight, which the engine never answers.
+    body = b'{"confidence": 0.6}'
+    for headers in ({"Content-Type": "text/plain"}, {}):
+        r = client.put("/api/config/runtime", content=body, headers=headers)
+        assert r.status_code == 415
+        assert r.json() == {"api": 1, "error": "expected application/json"}
+    assert rig.ctx.runtime.confidence == 0.4
+    r = client.put(
+        "/api/config/runtime",
+        content=body,
+        headers={"Content-Type": "Application/JSON; charset=utf-8"},
+    )
+    assert r.status_code == 200
     assert rig.ctx.runtime.confidence == 0.6
 
 
@@ -397,6 +446,76 @@ def test_token_mode_dashboard_shell_public(tmp_path, monkeypatch):
             assert c.get("/api/info").status_code == 401
             r = c.get("/api/info", headers={"X-SkyEye-Token": "s3cret"})
             assert r.status_code == 200 and r.json()["info"]["auth"] == "token"
+    finally:
+        rig.repo.close()
+
+
+def _raw_request(app, method: str, path: str, raw_path: bytes | None = None) -> tuple[int, bytes]:
+    """Call the ASGI app with an exact path: HTTP clients normalise '..' away, a raw
+    socket does not, and uvicorn hands the percent-decoded path to the app."""
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": raw_path if raw_path is not None else path.encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"host", b"testserver")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+    }
+    messages: list[dict] = []
+    requested = False
+
+    async def receive() -> dict:
+        nonlocal requested
+        if not requested:
+            requested = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await asyncio.Event().wait()  # the client stays connected until the response ends
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict) -> None:
+        messages.append(message)
+
+    asyncio.run(asyncio.wait_for(app(scope, receive, send), timeout=10))
+    status = next(m["status"] for m in messages if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
+    return status, body
+
+
+def test_token_mode_public_shell_does_not_leak_through_odd_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKYEYE_API_TOKEN", "s3cret")
+    rig = make_rig(
+        tmp_path / "data", mode="token", token="s3cret", dashboard_dir=make_dist(tmp_path)
+    )
+    (media_dir(rig.ctx.data_dir) / "x.jpg").write_bytes(JPEG)
+    try:
+        app = create_app(rig.ctx)
+        # the helper itself works: the public shell is served, the data needs the token
+        assert _raw_request(app, "GET", "/assets/app.js") == (200, b"console.log(1)")
+        assert _raw_request(app, "GET", "/api/info")[0] == 401
+        cases = [
+            ("GET", "/assets/../api/info", None, 404),
+            ("GET", "/assets/../api/info", b"/assets/%2e%2e/api/info", 404),
+            ("GET", "/assets/%2e%2e/api/info", None, 404),
+            ("GET", "/assets/../../data/sky-eye.db", None, 404),
+            ("GET", "/assets/..\\..\\data\\sky-eye.db", None, 404),
+            ("GET", "/assets/../../data/media/x.jpg", None, 404),
+            ("GET", "/assetsX", None, 401),
+            ("GET", "/assets", None, 401),
+            ("POST", "/", None, 401),
+            ("HEAD", "/", None, 401),
+            ("PUT", "/assets/app.js", None, 401),
+        ]
+        for method, path, raw, expected in cases:
+            status, body = _raw_request(app, method, path, raw)
+            assert status == expected, (method, path, raw, status)
+            assert b'"info"' not in body and b"SQLite format" not in body
+            assert b"fakejpeg" not in body
     finally:
         rig.repo.close()
 

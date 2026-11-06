@@ -192,7 +192,10 @@ class Pipeline:
                 thread.join()
 
     def wait(self, timeout: float | None = None) -> bool:
-        """True once the pipeline has finished (events closed)."""
+        """True once the pipeline has finished (events closed, clips written).
+
+        status().source_state turns "ended" earlier, as soon as the source ends.
+        """
         return self._done.wait(timeout)
 
     # ----- observers (any thread) -----
@@ -226,6 +229,11 @@ class Pipeline:
                 if frame is None:
                     if self._source.ended:
                         log.info("video source ended")
+                        # Report the end now: finishing the clips (in _finish) can take
+                        # a minute, and wait() still waits for that.
+                        with self._lock:
+                            if self._state != "error":
+                                self._state = "ended"
                         break
                     self._stop_event.wait(_RETRY_S)
                     continue

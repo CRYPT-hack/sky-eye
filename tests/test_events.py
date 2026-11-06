@@ -246,3 +246,33 @@ def test_truck_new_published_before_clip_start(tmp_path):
         assert seen == [["truck.new"]]
     finally:
         rig.close()
+
+
+def test_failed_snapshot_update_keeps_old_snapshot(tmp_path, monkeypatch, caplog):
+    # e.g. Windows still refuses the rename because a viewer holds the old file
+    import engine.events.manager as manager_mod
+
+    real = manager_mod.save_snapshot
+    calls = [0]
+
+    def flaky(*args, **kwargs):
+        calls[0] += 1
+        if calls[0] > 1:
+            raise PermissionError("file in use")
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(manager_mod, "save_snapshot", flaky)
+    rig = Rig(tmp_path)
+    try:
+        rig.feed(0, 0.0, result(0.5))
+        drain(rig.q)
+        with caplog.at_level("WARNING", logger="engine.events.manager"):
+            rig.feed(1, 1.0, result(0.9))  # does not raise: the frame is not lost
+        rec = rig.repo.list_trucks()[0]
+        assert rec.best_score == 0.5  # still describes the saved files
+        assert (tmp_path / "media" / rec.snapshot_path).exists()
+        assert not [m for m in drain(rig.q) if m["type"] == "truck.updated"]
+        assert any("snapshot" in r.getMessage() for r in caplog.records)
+        assert rig.mgr.active_count == 1
+    finally:
+        rig.close()
