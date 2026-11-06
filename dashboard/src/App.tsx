@@ -1,6 +1,8 @@
 import { useEffect, type ReactNode } from "react";
-import { ApiProvider } from "./apiContext";
+import { ApiProvider, useApi } from "./apiContext";
+import TokenPrompt from "./components/TokenPrompt";
 import LivePage from "./live/LivePage";
+import StatusPage from "./status/StatusPage";
 import TruckDetail from "./trucks/TruckDetail";
 import TrucksPage from "./trucks/TrucksPage";
 import { href, useRoute, type Route } from "./router";
@@ -79,11 +81,6 @@ function pageTitle(route: Route): string {
   }
 }
 
-// Stand-in until the real page lands (Status: Task 7).
-const PLACEHOLDER = {
-  status: "Engine and detector details and the detection settings will show here.",
-};
-
 function BrandMark() {
   return (
     <svg className="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
@@ -104,6 +101,7 @@ function Shell() {
   const route = useRoute();
   const title = pageTitle(route);
   const current = sectionOf(route);
+  const { unauthorized } = useApi();
 
   useEffect(() => {
     document.title = `${title} – sky-eye`;
@@ -145,12 +143,11 @@ function Shell() {
           ) : route.page === "truck" ? (
             <TruckDetail id={route.id} />
           ) : (
-            <div className="empty">
-              <p>{PLACEHOLDER.status}</p>
-            </div>
+            <StatusPage />
           )}
         </div>
       </main>
+      {unauthorized && <TokenPrompt />}
     </>
   );
 }
