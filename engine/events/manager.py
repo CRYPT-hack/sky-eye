@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,8 @@ from engine.storage import (
 )
 
 log = logging.getLogger(__name__)
+
+_HEARTBEAT_S = 5.0  # an active truck's last_seen is refreshed at most this often (frame time)
 
 
 def _iso(value: datetime) -> str:
@@ -52,6 +55,7 @@ def truck_to_json(rec: TruckRecord) -> dict:
         "lon": rec.lon,
         "geo_error_m": rec.geo_error_m,
         "geo_status": rec.geo_status,
+        "clip_status": rec.clip_status,
     }
 
 
@@ -63,6 +67,7 @@ class _Active:
     last_seen: datetime
     full_path: Path
     crop_path: Path
+    heartbeat_ts: float  # frame.ts of the last last_seen write
 
 
 class EventManager:
@@ -109,33 +114,50 @@ class EventManager:
             self._bus.publish({"api": 1, "type": kind, "truck": truck_to_json(rec)})
 
     def on_frame(self, frame: Frame, result: TrackerResult) -> None:
-        improved: list[int] = []
-        with self._lock:
-            for track in result.confirmed:
-                state = self._active.get(track.track_id)
-                score = track.detection.score
-                if state is None:
-                    self._create(frame, track.track_id, track.detection)
-                    continue
-                state.last_seen = frame.wall_time
-                if frame.ts - state.first_ts <= self._window and score > state.best_score:
-                    try:
-                        save_snapshot(
-                            frame, track.detection.box, state.full_path, state.crop_path
-                        )
-                    except OSError as exc:
-                        # the earlier snapshot stays; a later, better frame may still win
-                        log.warning(
-                            "could not update the snapshot of truck %d: %s", state.truck_id, exc
-                        )
+        improved: list[int] = []  # trucks to publish truck.updated for (snapshot / heartbeat)
+        created: list[Callable[[], None]] = []  # truck.new publish + clip start, after the lock
+        ended: list[_Active] = []
+        try:
+            with self._lock:
+                for track in result.confirmed:
+                    state = self._active.get(track.track_id)
+                    score = track.detection.score
+                    if state is None:
+                        created.append(self._create(frame, track.track_id, track.detection))
                         continue
-                    state.best_score = score
-                    self._repo.update_truck(state.truck_id, best_score=score)
-                    if state.truck_id not in improved:
-                        improved.append(state.truck_id)
-            ended = [self._active.pop(t) for t in result.ended_ids if t in self._active]
-            for state in ended:
-                self._repo.update_truck(state.truck_id, last_seen=state.last_seen)
+                    state.last_seen = frame.wall_time
+                    if frame.ts - state.heartbeat_ts >= _HEARTBEAT_S:
+                        state.heartbeat_ts = frame.ts
+                        self._repo.update_truck(state.truck_id, last_seen=state.last_seen)
+                        if state.truck_id not in improved:
+                            improved.append(state.truck_id)
+                    if frame.ts - state.first_ts <= self._window and score > state.best_score:
+                        try:
+                            save_snapshot(
+                                frame, track.detection.box, state.full_path, state.crop_path
+                            )
+                        except OSError as exc:
+                            # the earlier snapshot stays; a later, better frame may still win
+                            log.warning(
+                                "could not update the snapshot of truck %d: %s", state.truck_id, exc
+                            )
+                            continue
+                        state.best_score = score
+                        self._repo.update_truck(state.truck_id, best_score=score)
+                        if state.truck_id not in improved:
+                            improved.append(state.truck_id)
+                ended = [self._active.pop(t) for t in result.ended_ids if t in self._active]
+                for state in ended:
+                    self._repo.update_truck(state.truck_id, last_seen=state.last_seen)
+        finally:
+            # even when _create failed for a later track: earlier trucks are already
+            # recorded and must still get truck.new and their clip
+            for start in created:
+                try:
+                    start()
+                except Exception:
+                    log.exception("could not announce a new truck or start its clip")
+        # nothing below runs under the lock: publishing may block or call back
         ended_ids = {state.truck_id for state in ended}
         for truck_id in improved:
             if truck_id not in ended_ids:
@@ -143,8 +165,9 @@ class EventManager:
         for state in ended:
             self._publish("truck.updated", state.truck_id)
 
-    def _create(self, frame: Frame, track_id: int, det) -> None:
-        # called with self._lock held; publishes truck.new before starting the clip
+    def _create(self, frame: Frame, track_id: int, det) -> Callable[[], None]:
+        # called with self._lock held; returns the step to run once it is released:
+        # publish truck.new, then start the clip (so truck.new always comes first)
         folder = day_dir(self._data_dir, frame.wall_time)
         stem = f"{self._run_id}_{track_id}"
         full_path = folder / f"{stem}_full.jpg"
@@ -162,7 +185,7 @@ class EventManager:
         )
         truck_id = self._repo.insert_truck(rec)
         self._active[track_id] = _Active(
-            truck_id, frame.ts, det.score, frame.wall_time, full_path, crop_path
+            truck_id, frame.ts, det.score, frame.wall_time, full_path, crop_path, frame.ts
         )
         self._total += 1
         log.info("truck %d created (track %d, score %.2f)", truck_id, track_id, det.score)
@@ -170,7 +193,7 @@ class EventManager:
 
         def on_done(path: Path, truck_id: int = truck_id) -> None:
             path = Path(path)
-            self._repo.update_truck(truck_id, clip_path=self._rel(path))
+            self._repo.update_truck(truck_id, clip_path=self._rel(path), clip_status="saved")
             log.info("clip written for truck %d: %s", truck_id, path)
             cleared: list[int] = []
             try:
@@ -185,8 +208,22 @@ class EventManager:
                 if other != truck_id:
                     self._publish("truck.updated", other)
 
-        self._publish("truck.new", truck_id)
-        self._evidence.start_clip(stem, frame.ts, clip_path, on_done)
+        def on_fail(status: str, truck_id: int = truck_id) -> None:
+            # "skipped" / "failed"; may run on the recorder's worker thread, or while the
+            # engine is stopping and the repository is already closing: never raise
+            try:
+                self._repo.update_truck(truck_id, clip_status=status)
+                self._publish("truck.updated", truck_id)
+            except Exception as exc:  # noqa: BLE001 - shutdown must not fail on this
+                log.debug("could not record clip status %r of truck %d: %r", status, truck_id, exc)
+
+        trigger_ts = frame.ts
+
+        def start() -> None:
+            self._publish("truck.new", truck_id)
+            self._evidence.start_clip(stem, trigger_ts, clip_path, on_done, on_fail)
+
+        return start
 
     def close(self) -> None:
         with self._lock:

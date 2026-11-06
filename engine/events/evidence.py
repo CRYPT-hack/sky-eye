@@ -201,6 +201,8 @@ class _Job:
     end_ts: float
     path: Path
     on_done: Callable[[Path], None]
+    on_fail: Callable[[str], None] | None = None
+    dropped: bool = False  # abort() already reported this job as failed
     frames: list[Frame] = field(default_factory=list)
 
 
@@ -219,6 +221,12 @@ class EvidenceRecorder:
     on_done callbacks run on the single worker thread. At most ``max_jobs``
     clips may be collecting frames or waiting/encoding at once; further clips
     are skipped (their on_done is never called, so the truck has no clip).
+
+    A clip that will never be written reports why through its optional
+    on_fail(status): "skipped" (over the limit; called synchronously from
+    start_clip) or "failed" (encode error, no frames, or aborted; called on the
+    worker thread, or on the aborting thread for clips dropped by abort()).
+    No recorder lock is held while on_fail runs.
     """
 
     def __init__(
@@ -243,6 +251,7 @@ class EvidenceRecorder:
         self._lock = threading.Lock()
         self._pending: list[_Job] = []  # collecting frames
         self._futures: list[Future] = []  # submitted, possibly not done
+        self._job_of: dict[Future, _Job] = {}
         self._aborted = False
         self._abort_evt = threading.Event()  # tells a running encode to give up
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="evidence")
@@ -276,32 +285,53 @@ class EvidenceRecorder:
         trigger_ts: float,
         path: Path,
         on_done: Callable[[Path], None],
+        on_fail: Callable[[str], None] | None = None,
     ) -> None:
         job = _Job(
             key=key,
             end_ts=trigger_ts + self._after_s,
             path=Path(path),
             on_done=on_done,
+            on_fail=on_fail,
         )
+        status: str | None = None
         with self._lock:
             if self._aborted:
-                log.info("clip %s skipped: the engine is stopping", key)
-                return
-            self._futures = [f for f in self._futures if not f.done()]
-            outstanding = len(self._pending) + len(self._futures)
-            if outstanding >= self._max_jobs:
-                log.warning(
-                    "clip %s skipped: %d clips already in progress (limit %d)",
-                    key,
-                    outstanding,
-                    self._max_jobs,
-                )
-                return
-            job.frames = self._ring.since(trigger_ts - self._before_s)
-            if job.frames and job.frames[-1].ts >= job.end_ts:
-                self._submit(job)
+                log.info("clip %s dropped (failed): the engine is stopping", key)
+                status = "failed"
             else:
-                self._pending.append(job)
+                self._prune_futures()
+                outstanding = len(self._pending) + len(self._futures)
+                if outstanding >= self._max_jobs:
+                    log.warning(
+                        "clip %s skipped: %d clips already in progress (limit %d)",
+                        key,
+                        outstanding,
+                        self._max_jobs,
+                    )
+                    status = "skipped"
+                else:
+                    job.frames = self._ring.since(trigger_ts - self._before_s)
+                    if job.frames and job.frames[-1].ts >= job.end_ts:
+                        self._submit(job)
+                    else:
+                        self._pending.append(job)
+        if status is not None:
+            self._notify_fail(job, status)
+
+    def _prune_futures(self) -> None:
+        # called with self._lock held
+        self._futures = [f for f in self._futures if not f.done()]
+        self._job_of = {f: j for f, j in self._job_of.items() if f in self._futures}
+
+    @staticmethod
+    def _notify_fail(job: _Job, status: str) -> None:
+        if job.on_fail is None:
+            return
+        try:
+            job.on_fail(status)
+        except Exception:
+            log.exception("on_fail failed for clip %s", job.key)
 
     def flush(self) -> None:
         """Finish pending clips with the frames they have; block until all done.
@@ -315,7 +345,7 @@ class EvidenceRecorder:
             futures = list(self._futures)
         wait(futures)  # a cancelled (dropped) job counts as done
         with self._lock:
-            self._futures = [f for f in self._futures if not f.done()]
+            self._prune_futures()
 
     def abort(self) -> None:
         """Drop every clip that is not finished yet (no on_done for them).
@@ -327,13 +357,22 @@ class EvidenceRecorder:
         self._abort_evt.set()
         with self._lock:
             self._aborted = True
-            dropped = len(self._pending)
+            dropped_jobs = list(self._pending)
             self._pending.clear()
             for future in self._futures:
-                if future.cancel():
-                    dropped += 1
-        if dropped:
-            log.info("stopping: dropped %d clip(s) that had not started encoding", dropped)
+                if future.cancel():  # True again for an already-cancelled future
+                    job = self._job_of.get(future)
+                    if job is not None and not job.dropped:
+                        dropped_jobs.append(job)
+            for job in dropped_jobs:
+                job.dropped = True
+        if dropped_jobs:
+            log.info(
+                "stopping: dropped %d clip(s) that had not started encoding", len(dropped_jobs)
+            )
+        for job in dropped_jobs:
+            self._notify_fail(job, "failed")
+            job.frames = []
 
     def close(self, drop_pending: bool = False) -> None:
         """Flush all clips (default), or with drop_pending=True abort() first."""
@@ -346,11 +385,20 @@ class EvidenceRecorder:
         # called with self._lock held
         if self._aborted:
             return
-        self._futures.append(self._executor.submit(self._run, job))
+        future = self._executor.submit(self._run, job)
+        self._futures.append(future)
+        self._job_of[future] = job
 
     def _run(self, job: _Job) -> None:
+        try:
+            self._run_job(job)
+        finally:
+            job.frames = []  # _job_of keeps the job around: do not keep its frames alive
+
+    def _run_job(self, job: _Job) -> None:
         if not job.frames:
             log.warning("clip %s has no frames; skipped", job.key)
+            self._notify_fail(job, "failed")
             return
         try:
             write_clip(
@@ -358,9 +406,11 @@ class EvidenceRecorder:
             )
         except ClipAborted:
             log.info("clip %s abandoned: the engine is stopping", job.key)
+            self._notify_fail(job, "failed")
             return
         except Exception:
             log.exception("failed to write clip %s", job.path)
+            self._notify_fail(job, "failed")
             return
         try:
             job.on_done(job.path)

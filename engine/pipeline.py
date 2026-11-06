@@ -29,7 +29,7 @@ _FAIL_SUMMARY_S = 10.0  # repeated frame failures: at most one log line per this
 
 @dataclass
 class PipelineStatus:
-    source_state: str  # "starting" | "running" | "ended" | "error"
+    source_state: str  # "starting" | "running" | "reconnecting" | "ended" | "error"
     fps: float  # processed frames/s over the last 2 s
     frames_processed: int
     trucks_now: int
@@ -141,6 +141,7 @@ class Pipeline:
         self._capture_thread: threading.Thread | None = None
         self._infer_thread: threading.Thread | None = None
         self._oom_hinted = False
+        self._got_frame = False  # capture thread only
         # frame-failure logging (inference thread only)
         self._fail_logged_at: float | None = None
         self._fail_suppressed = 0
@@ -222,7 +223,6 @@ class Pipeline:
     # ----- capture thread -----
 
     def _capture_loop(self) -> None:
-        running = False
         try:
             while not self._stop_event.is_set():
                 frame = self._source.read()
@@ -235,13 +235,11 @@ class Pipeline:
                             if self._state != "error":
                                 self._state = "ended"
                         break
+                    self._mirror_source_state()
                     self._stop_event.wait(_RETRY_S)
                     continue
-                if not running:
-                    running = True
-                    with self._lock:
-                        if self._state == "starting":
-                            self._state = "running"
+                self._got_frame = True
+                self._mirror_source_state()
                 # every captured frame, so clips keep full rate when inference skips
                 self._recorder.push(frame)
                 if not self._channel.put(frame):
@@ -253,6 +251,16 @@ class Pipeline:
         finally:
             self._close_source()
             self._channel.close()
+
+    def _mirror_source_state(self) -> None:
+        """Capture thread: after the first frame, report the source's own health
+        ("running" / "reconnecting"); "ended" and "error" are never overwritten."""
+        if not self._got_frame:
+            return
+        source_state = getattr(self._source, "state", "running")
+        with self._lock:
+            if self._state in ("starting", "running", "reconnecting"):
+                self._state = source_state
 
     def _close_source(self) -> None:
         try:

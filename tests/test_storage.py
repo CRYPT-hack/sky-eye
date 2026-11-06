@@ -181,3 +181,96 @@ def test_retention_skips_undeletable_file(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "unlink", unlink)
     assert enforce_retention(tmp_path, 700) == [tmp_path / "other.mp4"]
     assert (tmp_path / "locked.mp4").exists()
+
+
+def test_clip_status_default_and_cleared(repo):
+    run_id = repo.create_run("s", "{}")
+    a = repo.insert_truck(make_rec(run_id, 1, clip_path="2026-11-05/a.mp4"))
+    assert repo.get_truck(a).clip_status == "pending"
+    repo.update_truck(a, clip_status="saved")
+    assert repo.get_truck(a).clip_status == "saved"
+    repo.clear_clip_paths(["2026-11-05/a.mp4"])
+    got = repo.get_truck(a)
+    assert got.clip_path is None and got.clip_status == "removed"
+
+
+def _old_db(path):
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL,
+            source TEXT NOT NULL, config_json TEXT NOT NULL);
+        CREATE TABLE trucks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL REFERENCES runs(id),
+            track_id INTEGER NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            best_score REAL NOT NULL, snapshot_path TEXT, crop_path TEXT, clip_path TEXT,
+            lat REAL, lon REAL, geo_error_m REAL, geo_status TEXT NOT NULL DEFAULT 'unknown');
+        INSERT INTO runs (started_at, source, config_json)
+            VALUES ('2026-11-05T10:00:00+00:00', 's', '{}');
+        INSERT INTO trucks (run_id, track_id, first_seen, last_seen, best_score, clip_path)
+            VALUES (1, 1, '2026-11-05T10:00:00+00:00', '2026-11-05T10:00:05+00:00', 0.9,
+                    '2026-11-05/a.mp4');
+        INSERT INTO trucks (run_id, track_id, first_seen, last_seen, best_score)
+            VALUES (1, 2, '2026-11-05T10:01:00+00:00', '2026-11-05T10:01:05+00:00', 0.8);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_clip_status_migration(tmp_path):
+    db = tmp_path / "old.db"
+    _old_db(db)
+    for _ in range(2):  # reopening must be a no-op (idempotent)
+        r = TruckRepository(db)
+        try:
+            by_track = {t.track_id: t for t in r.list_trucks()}
+            assert by_track[1].clip_status == "saved"
+            assert by_track[2].clip_status == "failed"
+            new = r.insert_truck(make_rec(1, 3))
+            assert r.get_truck(new).clip_status == "pending"
+        finally:
+            r.close()
+
+
+def test_migration_leaves_new_pending_row_alone_and_rolls_back(tmp_path):
+    db = tmp_path / "old.db"
+    _old_db(db)
+    r = TruckRepository(db)
+    new = r.insert_truck(make_rec(1, 9))
+    r.close()
+    r = TruckRepository(db)  # already migrated: must not touch the pending row
+    try:
+        assert r.get_truck(new).clip_status == "pending"
+    finally:
+        r.close()
+
+
+def test_migration_is_one_transaction(tmp_path, monkeypatch):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    _old_db(db)
+    real = sqlite3.Connection
+
+    class Boom(real):
+        def execute(self, sql, *a):
+            if sql.startswith("UPDATE trucks SET clip_status"):
+                raise sqlite3.OperationalError("crash")
+            return super().execute(sql, *a)
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **k: real_connect(*a, factory=Boom, **k)
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        TruckRepository(db)
+    monkeypatch.undo()
+    conn = sqlite3.connect(str(db))
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(trucks)")}
+    conn.close()
+    assert "clip_status" not in cols  # ALTER rolled back with the failed backfill
+

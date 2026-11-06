@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -16,7 +17,7 @@ from types import FrameType
 import uvicorn
 
 from engine.api.app import VERSION, EngineContext, create_app
-from engine.config import AppConfig, ConfigError, load_config
+from engine.config import AppConfig, ConfigError, SourceConfig, load_config
 from engine.detectors.rfdetr import DetectorError, build_detector
 from engine.events.bus import EventBus
 from engine.events.evidence import EvidenceRecorder
@@ -24,6 +25,7 @@ from engine.events.manager import EventManager
 from engine.logging_setup import setup_logging
 from engine.pipeline import Pipeline, RuntimeSettings
 from engine.sources import build_source
+from engine.sources.stream import redact_url
 from engine.storage import TruckRepository, media_dir, remove_partial_clips
 from engine.tracking import build_tracker
 
@@ -79,16 +81,53 @@ def _default_dashboard_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "dashboard" / "dist"
 
 
+def _source_name(src: SourceConfig) -> str:
+    """The source as /api/info shows it; never a stream password."""
+    if src.type == "file":
+        return src.path.name if src.path else ""  # file name only: no folders
+    if src.type == "capture":
+        return f"capture device {src.device}"
+    if src.type == "stream":
+        return redact_url(src.url or "")
+    return f"go2rtc:{src.go2rtc.name}"
+
+
+def _run_label(src: SourceConfig) -> str:
+    """The source as the run record and the startup log name it."""
+    if src.type == "file":
+        return str(src.path)
+    if src.type == "capture":
+        return f"capture:{src.device}"
+    return _source_name(src)
+
+
+def _source_field(src: SourceConfig) -> str:
+    """The config field an open failure points at."""
+    if src.type == "file":
+        return f"source.path {src.path}"
+    if src.type == "capture":
+        return f"source.device {src.device}"
+    if src.type == "stream":
+        return "source.url"
+    return f"source.go2rtc.name {src.go2rtc.name}"
+
+
+def _config_json(cfg: AppConfig) -> str:
+    """The config stored with the run, with stream credentials redacted."""
+    data = cfg.model_dump(mode="json")
+    source = data["source"]
+    if source.get("url"):
+        source["url"] = redact_url(source["url"])
+    source["go2rtc"]["rtsp_base"] = redact_url(source["go2rtc"]["rtsp_base"])
+    return json.dumps(data, separators=(",", ":"))
+
+
 def _engine_info(cfg: AppConfig, source_fps: float) -> dict[str, Any]:
-    if cfg.source.type == "file":
-        name = cfg.source.path.name if cfg.source.path else ""  # file name only: no folders
-    else:
-        name = f"capture device {cfg.source.device}"
     return {
         "version": VERSION,
         "source": {
-            "type": "file" if cfg.source.type == "file" else "capture",
-            "name": name,
+            "type": cfg.source.type,
+            "name": _source_name(cfg.source),
             "fps": float(source_fps),
         },
         "detector": {
@@ -122,12 +161,11 @@ def build_engine(cfg: AppConfig) -> EngineContext:
         try:
             source.open()
         except (RuntimeError, OSError) as exc:
-            if cfg.source.type == "file":
-                where = f"source.path {cfg.source.path}"
-            else:
-                where = f"source.device {cfg.source.device}"
-            raise ConfigError(f"cannot open video source ({where}): {exc}") from exc
-        label = str(cfg.source.path) if cfg.source.type == "file" else f"capture:{cfg.source.device}"
+            raise ConfigError(
+                f"cannot open video source ({_source_field(cfg.source)}): "
+                f"{redact_url(str(exc))}"
+            ) from exc
+        label = _run_label(cfg.source)
         size = getattr(source, "frame_size", None)
         log.info(
             "source: %s, %s @ %.2f fps, realtime %s",
@@ -142,7 +180,7 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             data_dir, cfg.evidence.clip_before_s, cfg.evidence.clip_after_s
         )
         repo = TruckRepository(data_dir / "sky-eye.db")
-        run_id = repo.create_run(label, cfg.model_dump_json())
+        run_id = repo.create_run(label, _config_json(cfg))
         remove_partial_clips(media_dir(data_dir))
         bus = EventBus()
         manager = EventManager(

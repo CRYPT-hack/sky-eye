@@ -35,7 +35,7 @@ export interface Runtime {
 
 export interface Info {
   version: string;
-  source: { type: "file" | "capture"; name: string; fps: number };
+  source: { type: "file" | "capture" | "stream" | "go2rtc"; name: string; fps: number };
   detector: {
     model: string;
     input_size: number;

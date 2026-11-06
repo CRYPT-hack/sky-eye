@@ -135,7 +135,7 @@ class Rig:
         self.events = EventManager(
             self.repo, self.recorder, self.bus, self.run_id, self.data_dir, 2.0, 10**9
         )
-        if isinstance(video, ScriptedSource):
+        if hasattr(video, "read"):
             self.source = video
         else:
             self.source = FileSource(video, realtime=realtime, loop=False)
@@ -483,5 +483,67 @@ def test_repeated_frame_failures_are_summarised(tmp_path, caplog, monkeypatch):
         counts = [int(r.getMessage().split()[0]) for r in summaries]
         assert sum(counts) == 29
         assert rig.pipeline.status().frames_processed == 0
+    finally:
+        rig.close()
+
+
+class LiveFakeSource:
+    """Live-style source whose state and frames the test controls."""
+
+    def __init__(self) -> None:
+        self.state = "reconnecting"
+        self._frames: queue.Queue = queue.Queue()
+        self._ended = False
+        self.closed = False
+
+    def push(self, frame) -> None:
+        self._frames.put(frame)
+
+    def finish(self) -> None:
+        self._frames.put(None)
+
+    def open(self) -> None:
+        pass
+
+    def read(self):
+        try:
+            item = self._frames.get(timeout=0.01)
+        except queue.Empty:
+            return None
+        if item is None:
+            self._ended = True
+        return item
+
+    def close(self) -> None:
+        self.closed = True
+
+    @property
+    def fps(self) -> float:
+        return 30.0
+
+    @property
+    def ended(self) -> bool:
+        return self._ended
+
+
+def test_pipeline_reports_reconnecting(tmp_path):
+    source = LiveFakeSource()
+    rig = Rig(tmp_path, source, FakeDetector(nothing), realtime=True)
+    try:
+        rig.pipeline.start()
+        time.sleep(0.1)
+        # no frame yet: still starting, whatever the source says
+        assert rig.pipeline.status().source_state == "starting"
+        source.state = "running"
+        source.push(fake_frame(0, 0.0))
+        assert wait_until(lambda: rig.pipeline.status().source_state == "running", 5.0)
+        source.state = "reconnecting"
+        assert wait_until(lambda: rig.pipeline.status().source_state == "reconnecting", 5.0)
+        source.state = "running"
+        assert wait_until(lambda: rig.pipeline.status().source_state == "running", 5.0)
+        source.finish()
+        assert wait_until(lambda: rig.pipeline.status().source_state == "ended", 5.0)
+        source.state = "reconnecting"
+        assert rig.pipeline.status().source_state == "ended"  # never overwritten
     finally:
         rig.close()

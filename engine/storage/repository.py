@@ -22,6 +22,8 @@ class TruckRecord:
     lon: float | None = None
     geo_error_m: float | None = None
     geo_status: str = "unknown"
+    # "pending" | "saved" | "skipped" | "failed" | "removed"
+    clip_status: str = "pending"
 
 
 _COLUMNS = [f.name for f in fields(TruckRecord)]
@@ -48,7 +50,8 @@ CREATE TABLE IF NOT EXISTS trucks (
     lat REAL,
     lon REAL,
     geo_error_m REAL,
-    geo_status TEXT NOT NULL DEFAULT 'unknown'
+    geo_status TEXT NOT NULL DEFAULT 'unknown',
+    clip_status TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE INDEX IF NOT EXISTS idx_trucks_first_seen ON trucks(first_seen);
 CREATE INDEX IF NOT EXISTS idx_trucks_run ON trucks(run_id);
@@ -87,6 +90,28 @@ class TruckRepository:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
+            self._conn.commit()
+
+    def _migrate(self) -> None:
+        # called with self._lock held; idempotent
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(trucks)")}
+        if "clip_status" not in cols:
+            # one transaction: a crash between the two statements must not leave
+            # old rows "pending" forever
+            self._conn.execute("BEGIN")
+            try:
+                self._conn.execute(
+                    "ALTER TABLE trucks ADD COLUMN clip_status TEXT NOT NULL DEFAULT 'pending'"
+                )
+                # rows from before the column existed are all settled: a clip or no clip
+                self._conn.execute(
+                    "UPDATE trucks SET clip_status = "
+                    "CASE WHEN clip_path IS NOT NULL THEN 'saved' ELSE 'failed' END"
+                )
+            except BaseException:
+                self._conn.rollback()
+                raise
             self._conn.commit()
 
     def create_run(self, source: str, config_json: str) -> int:
@@ -130,7 +155,7 @@ class TruckRepository:
         if not rel_paths:
             return []
         marks = ", ".join("?" * len(rel_paths))
-        sql = f"UPDATE trucks SET clip_path = NULL WHERE clip_path IN ({marks}) RETURNING id"
+        sql = f"UPDATE trucks SET clip_path = NULL, clip_status = 'removed' WHERE clip_path IN ({marks}) RETURNING id"
         with self._lock:
             rows = self._conn.execute(sql, list(rel_paths)).fetchall()
             self._conn.commit()

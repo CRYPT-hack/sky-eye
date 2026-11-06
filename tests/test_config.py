@@ -151,3 +151,81 @@ def test_dashboard_dir_default_and_relative(tmp_path):
     assert load_config(_write(tmp_path, "{}")).api.dashboard_dir is None
     cfg = load_config(_write(tmp_path, "api:\n  dashboard_dir: web\n"))
     assert cfg.api.dashboard_dir == tmp_path / "web"
+
+
+def test_source_config_stream_and_go2rtc(tmp_path):
+    from engine.config import SourceConfig
+    from engine.sources import StreamSource, build_source
+
+    with pytest.raises(ConfigError, match=r"source\.url: required for type: stream"):
+        load_config(_write(tmp_path, "source:\n  type: stream\n"))
+    with pytest.raises(ConfigError, match=r"source\.url: .*scheme"):
+        load_config(_write(tmp_path, "source:\n  type: stream\n  url: drone-feed\n"))
+    with pytest.raises(ConfigError, match=r"source\.url: .*'ftp'"):
+        load_config(_write(tmp_path, "source:\n  type: stream\n  url: ftp://cam/live\n"))
+    with pytest.raises(ConfigError, match=r"source\.url") as err:  # typo in the scheme
+        load_config(_write(tmp_path, "source:\n  type: stream\n  url: rtps://pilot:s3cret@cam/live\n"))
+    assert "s3cret" not in str(err.value)  # the URL (it may hold a password) is not echoed
+    with pytest.raises(ConfigError, match=r"source\.go2rtc\.name: required for type: go2rtc"):
+        load_config(_write(tmp_path, "source:\n  type: go2rtc\n"))
+    with pytest.raises(ConfigError, match=r"source\.go2rtc\.port"):
+        load_config(_write(tmp_path, "source:\n  type: go2rtc\n  go2rtc:\n    port: 1\n"))
+
+    for scheme in ("rtsp", "rtsps", "rtmp", "rtmps", "udp", "http", "https"):
+        assert SourceConfig(type="stream", url=f"{scheme}://10.0.0.5:9000/x").url
+    cfg = load_config(_write(tmp_path, "source:\n  type: stream\n  url: udp://@:9000\n"))
+    assert cfg.source.url == "udp://@:9000"
+    src = build_source(cfg.source)
+    assert isinstance(src, StreamSource) and src.url == "udp://@:9000"
+
+    cfg = load_config(_write(tmp_path, "source:\n  type: go2rtc\n  go2rtc:\n    name: drone\n"))
+    assert cfg.source.go2rtc.rtsp_base == "rtsp://127.0.0.1:8554"
+    src = build_source(cfg.source)
+    assert isinstance(src, StreamSource) and src.url == "rtsp://127.0.0.1:8554/drone"
+    cfg = load_config(
+        _write(tmp_path, "source:\n  type: go2rtc\n  go2rtc:\n    rtsp_base: rtsp://10.0.0.2:8554/\n    name: dji\n")
+    )
+    assert build_source(cfg.source).url == "rtsp://10.0.0.2:8554/dji"
+    # a file source ignores the stream fields
+    assert load_config(_write(tmp_path, "{}")).source.url is None
+    # build_source checks too, for a config that skipped validation
+    with pytest.raises(ConfigError, match=r"source\.go2rtc\.name"):
+        build_source(SourceConfig.model_construct(type="go2rtc"))
+
+
+def test_stream_srt_points_to_go2rtc(tmp_path):
+    # the PyAV wheels have no libsrt
+    with pytest.raises(
+        ConfigError,
+        match=r"source\.url: SRT is not supported directly; "
+        r"relay it through go2rtc \(type: go2rtc\)",
+    ):
+        load_config(_write(tmp_path, "source:\n  type: stream\n  url: srt://10.0.0.5:9000\n"))
+
+
+@pytest.mark.parametrize("password", ["pa#ss", "pa/ss", "pa?ss"])
+def test_stream_url_reserved_chars_in_password_refused(tmp_path, password):
+    # urlsplit and FFmpeg would cut the authority at the raw character
+    url = f"rtsp://pilot:{password}@cam/live"
+    p = _write(tmp_path, f"source:\n  type: stream\n  url: '{url}'\n")
+    with pytest.raises(ConfigError, match=r"source\.url: .*percent-encode") as err:
+        load_config(p)
+    assert password not in str(err.value) and "pilot" not in str(err.value)
+    p = _write(
+        tmp_path,
+        "source:\n  type: go2rtc\n  go2rtc:\n    name: drone\n"
+        f"    rtsp_base: 'rtsp://admin:{password}@127.0.0.1:8554'\n",
+    )
+    with pytest.raises(ConfigError, match=r"source\.go2rtc\.rtsp_base: .*percent-encode") as err:
+        load_config(p)
+    assert password not in str(err.value)
+
+
+def test_stream_url_encoded_or_raw_at_in_password_accepted(tmp_path):
+    cfg = load_config(
+        _write(tmp_path, "source:\n  type: stream\n  url: rtsp://pilot:pa%23ss@cam/live\n")
+    )
+    assert cfg.source.url == "rtsp://pilot:pa%23ss@cam/live"
+    # a raw @ is fine: urlsplit and FFmpeg both split the authority at the last one
+    cfg = load_config(_write(tmp_path, "source:\n  type: stream\n  url: rtsp://u:p@ss@cam/live\n"))
+    assert cfg.source.url == "rtsp://u:p@ss@cam/live"
