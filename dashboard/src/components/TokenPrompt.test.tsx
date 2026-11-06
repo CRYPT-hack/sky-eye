@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 import { ApiProvider } from "../apiContext";
@@ -35,4 +35,14 @@ test("save is disabled until a token is typed, and trims it", async () => {
   expect(save).toBeEnabled();
   await user.click(save);
   expect(window.localStorage.getItem("skyeye.token")).toBe("secret");
+});
+
+test("reopens when closed while still shown", () => {
+  setup();
+  const dialog = screen.getByRole("dialog", { name: "Access token required" });
+  fireEvent(dialog, new Event("cancel", { cancelable: true }));
+  dialog.removeAttribute("open");
+  fireEvent(dialog, new Event("close"));
+  expect(dialog).toHaveAttribute("open");
+  expect(screen.getByLabelText("Access token")).toHaveFocus();
 });

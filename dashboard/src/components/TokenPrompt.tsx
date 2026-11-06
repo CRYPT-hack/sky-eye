@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { useApi } from "../apiContext";
 
 /** Modal asking for the engine's access token. Rendered by App while a request is unauthorized. */
@@ -11,7 +11,7 @@ export default function TokenPrompt() {
   const helpId = useId();
   const inputId = useId();
 
-  useEffect(() => {
+  const open = useCallback(() => {
     const dialog = dialogRef.current;
     if (dialog && !dialog.open) {
       // jsdom and very old browsers lack showModal: fall back to a plain open dialog.
@@ -20,6 +20,8 @@ export default function TokenPrompt() {
     }
     inputRef.current?.focus();
   }, []);
+
+  useEffect(open, [open]);
 
   const trimmed = value.trim();
 
@@ -36,6 +38,8 @@ export default function TokenPrompt() {
       aria-describedby={helpId}
       // The page cannot work without a token, so Esc does not dismiss it.
       onCancel={(e) => e.preventDefault()}
+      // preventDefault does not hold everywhere (close watchers, Android Back): reopen.
+      onClose={open}
     >
       <form className="stack" onSubmit={submit}>
         <h2 className="dialog-title" id={titleId}>

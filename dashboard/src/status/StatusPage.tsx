@@ -26,7 +26,8 @@ export default function StatusPage() {
   const { client, token, reportUnauthorized } = useApi();
   const [info, setInfo] = useState<Info | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [infoError, setInfoError] = useState<string | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
 
   const [confidence, setConfidence] = useState<number | null>(null);
@@ -49,39 +50,46 @@ export default function StatusPage() {
     [reportUnauthorized],
   );
 
-  // Static facts and the current setting, loaded again when the token changes.
+  // Static facts, the current setting and the status poll. Status polling and the uptime
+  // clock run only while the page is visible; a failed info/runtime load is retried on
+  // each poll tick until it succeeds.
   useEffect(() => {
     let cancelled = false;
-    setLoadError(null);
-    Promise.all([client.getInfo(), client.getRuntime()])
-      .then(([i, r]) => {
-        if (cancelled) return;
-        setInfo(i);
-        serverConfidence.current = r.confidence;
-        setConfidence(r.confidence);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setLoadError(fail(e));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [client, token, fail]);
-
-  // Status polling and the uptime clock run only while the page is visible.
-  useEffect(() => {
-    let cancelled = false;
+    let loaded = false;
+    let loading = false;
     let poll: ReturnType<typeof setInterval> | undefined;
     let clock: ReturnType<typeof setInterval> | undefined;
 
+    const load = () => {
+      if (loaded || loading) return;
+      loading = true;
+      Promise.all([client.getInfo(), client.getRuntime()])
+        .then(([i, r]) => {
+          loaded = true;
+          if (cancelled) return;
+          setInfo(i);
+          serverConfidence.current = r.confidence;
+          setConfidence(r.confidence);
+          setInfoError(null);
+        })
+        .catch((e: unknown) => {
+          if (!cancelled) setInfoError(fail(e));
+        })
+        .finally(() => {
+          loading = false;
+        });
+    };
     const fetchStatus = () => {
+      load();
       client
         .getStatus()
         .then((s) => {
-          if (!cancelled) setStatus(s);
+          if (cancelled) return;
+          setStatus(s);
+          setPollError(null);
         })
         .catch((e: unknown) => {
-          if (!cancelled) setLoadError(fail(e));
+          if (!cancelled) setPollError(fail(e));
         });
     };
     const stop = () => {
@@ -98,6 +106,8 @@ export default function StatusPage() {
     };
     const sync = () => (isVisible() ? start() : stop());
 
+    setInfoError(null);
+    load();
     sync();
     document.addEventListener("visibilitychange", sync);
     return () => {
@@ -118,6 +128,8 @@ export default function StatusPage() {
   );
 
   function onSlide(value: number) {
+    // Any response to an earlier choice is now stale.
+    saveSeq.current += 1;
     setConfidence(value);
     setSaved(false);
     setSaveError(null);
@@ -128,8 +140,8 @@ export default function StatusPage() {
       client
         .putRuntime({ confidence: value })
         .then((r) => {
-          if (seq !== saveSeq.current) return;
           serverConfidence.current = r.confidence;
+          if (seq !== saveSeq.current) return;
           setConfidence(r.confidence);
           setSaved(true);
           savedTimer.current = setTimeout(() => setSaved(false), SAVED_SHOWN_MS);
@@ -146,7 +158,8 @@ export default function StatusPage() {
 
   return (
     <div className="stack">
-      {loadError && <Banner tone="error">{loadError}</Banner>}
+      {infoError && <Banner tone="error">{infoError}</Banner>}
+      {pollError && <Banner tone="error">{pollError}</Banner>}
 
       <section className="section" aria-labelledby="status-engine">
         <h2 className="section-title" id="status-engine">

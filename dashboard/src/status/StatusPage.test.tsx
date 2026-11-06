@@ -175,3 +175,62 @@ test("saving token retries", async () => {
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(screen.getByText("0.2.0")).toBeInTheDocument();
 });
+
+test("older in-flight save cannot overwrite a newer choice", async () => {
+  const { c } = setup();
+  let resolve06!: (r: Runtime) => void;
+  c.putRuntime.mockImplementationOnce(
+    () => new Promise<Runtime>((res) => (resolve06 = res)),
+  );
+  await flush();
+  const slider = screen.getByLabelText("Confidence") as HTMLInputElement;
+  fireEvent.change(slider, { target: { value: "0.6" } });
+  await flush(400);
+  expect(c.putRuntime).toHaveBeenCalledTimes(1);
+  fireEvent.change(slider, { target: { value: "0.7" } });
+  await act(async () => resolve06({ ...RUNTIME, confidence: 0.6 }));
+  expect(Number(slider.value)).toBe(0.7);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  await flush(400);
+  expect(c.putRuntime).toHaveBeenLastCalledWith({ confidence: 0.7 });
+});
+
+test("revert target is the last confirmed value", async () => {
+  const { c } = setup();
+  let resolve06!: (r: Runtime) => void;
+  c.putRuntime.mockImplementationOnce(
+    () => new Promise<Runtime>((res) => (resolve06 = res)),
+  );
+  c.putRuntime.mockRejectedValueOnce(new ApiError(422, "invalid runtime settings"));
+  await flush();
+  const slider = screen.getByLabelText("Confidence") as HTMLInputElement;
+  fireEvent.change(slider, { target: { value: "0.6" } });
+  await flush(400);
+  fireEvent.change(slider, { target: { value: "0.7" } });
+  await act(async () => resolve06({ ...RUNTIME, confidence: 0.6 }));
+  await flush(400);
+  expect(screen.getByRole("alert")).toHaveTextContent("invalid runtime settings");
+  expect(Number(slider.value)).toBe(0.6);
+});
+
+test("poll error clears after a later successful poll", async () => {
+  const { c } = setup();
+  await flush();
+  c.getStatus.mockRejectedValueOnce(new Error("boom"));
+  await flush(2000);
+  expect(screen.getByRole("alert")).toHaveTextContent("boom");
+  await flush(2000);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test("failed info load is retried on the next poll", async () => {
+  const { c } = setup({ info: new Error("down") });
+  await flush();
+  expect(screen.getByRole("alert")).toHaveTextContent("down");
+  expect(screen.getByLabelText("Confidence")).toBeDisabled();
+  c.getInfo.mockResolvedValue(INFO);
+  await flush(2000);
+  expect(screen.getByText("0.2.0")).toBeInTheDocument();
+  expect(screen.getByLabelText("Confidence")).toBeEnabled();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
