@@ -178,7 +178,7 @@ def test_retention_clears_db_clip_path_of_deleted_clip(tmp_path):
         rig.evidence.flush()
         old = rig.repo.get_truck(first.id)
         new = next(r for r in rig.repo.list_trucks() if r.id != first.id)
-        assert old.clip_path is None
+        assert old.clip_path is None and old.clip_status == "removed"
         assert not (tmp_path / "media" / first.clip_path).exists()
         assert new.clip_path is not None and (tmp_path / "media" / new.clip_path).exists()
         updates = [m for m in drain(rig.q) if m["type"] == "truck.updated"]
@@ -274,5 +274,113 @@ def test_failed_snapshot_update_keeps_old_snapshot(tmp_path, monkeypatch, caplog
         assert not [m for m in drain(rig.q) if m["type"] == "truck.updated"]
         assert any("snapshot" in r.getMessage() for r in caplog.records)
         assert rig.mgr.active_count == 1
+    finally:
+        rig.close()
+
+
+def _statuses(q, truck_id=None):
+    return [
+        m["truck"]["clip_status"]
+        for m in drain(q)
+        if m["type"] in ("truck.new", "truck.updated")
+        and (truck_id is None or m["truck"]["id"] == truck_id)
+    ]
+
+
+def test_clip_status_lifecycle_pending_then_saved(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        for i in range(60):
+            rig.feed(i, i / 30, result(0.8))
+        rig.evidence.flush()
+        statuses = _statuses(rig.q)
+        assert statuses[0] == "pending" and statuses[-1] == "saved"
+        assert rig.repo.list_trucks()[0].clip_status == "saved"
+    finally:
+        rig.close()
+
+
+def test_clip_status_skipped_when_cap_reached(tmp_path):
+    rig = Rig(tmp_path)
+    rig.evidence.close()
+    rig.evidence = rig.mgr._evidence = EvidenceRecorder(
+        tmp_path, before_s=1.0, after_s=1.0, max_jobs=1
+    )
+    try:
+        rig.feed(0, 0.0, result(0.8, track_id=1))
+        rig.feed(1, 0.1, result(0.8, track_id=2))  # second clip: over the cap
+        recs = {r.track_id: r for r in rig.repo.list_trucks()}
+        assert recs[1].clip_status == "pending"
+        assert recs[2].clip_status == "skipped"
+        msgs = [m for m in drain(rig.q) if m["type"] == "truck.updated"]
+        assert any(
+            m["truck"]["id"] == recs[2].id and m["truck"]["clip_status"] == "skipped"
+            for m in msgs
+        )
+    finally:
+        rig.close()
+
+
+def test_clip_status_failed_on_encode_error(tmp_path, monkeypatch):
+    import engine.events.evidence as evidence_mod
+
+    def boom(*a, **k):
+        raise RuntimeError("encoder exploded")
+
+    monkeypatch.setattr(evidence_mod, "write_clip", boom)
+    rig = Rig(tmp_path)
+    try:
+        for i in range(60):
+            rig.feed(i, i / 30, result(0.8))
+        rig.evidence.flush()
+        rec = rig.repo.list_trucks()[0]
+        assert rec.clip_status == "failed" and rec.clip_path is None
+        assert _statuses(rig.q)[-1] == "failed"
+    finally:
+        rig.close()
+
+
+def test_clip_status_failed_on_abort(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        rig.feed(0, 0.0, result(0.8, track_id=1))
+        rig.feed(1, 0.1, result(0.8, track_id=2))
+        drain(rig.q)
+        rig.evidence.abort()  # both clips are still collecting frames
+        assert {r.clip_status for r in rig.repo.list_trucks()} == {"failed"}
+        assert _statuses(rig.q) == ["failed", "failed"]
+    finally:
+        rig.close()
+
+
+def test_abort_with_closed_repo_is_swallowed(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed(0, 0.0, result(0.8))
+    rig.repo.close()
+    rig.evidence.abort()  # must not raise into shutdown
+    rig.evidence.close()
+
+
+def test_last_seen_heartbeat(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        base = datetime(2026, 11, 6, 12, 0, 0, tzinfo=timezone.utc)
+        update_ts: list[float] = []
+        last_seens: list[str] = []
+        seen_now = "2026-11-06T12:00:00Z"
+        for i in range(121):  # 12 s of frame time at 10 fps
+            ts = i / 10
+            frame = replace(fake_frame(i, ts), wall_time=base + timedelta(seconds=ts))
+            rig.evidence.push(frame)
+            rig.mgr.on_frame(frame, result(0.8))
+            for m in drain(rig.q):
+                if m["type"] == "truck.updated" and m["truck"]["last_seen"] != seen_now:
+                    seen_now = m["truck"]["last_seen"]
+                    update_ts.append(ts)
+                    last_seens.append(seen_now)
+        assert len(update_ts) >= 2
+        assert all(b - a >= 5.0 - 1e-9 for a, b in zip(update_ts, update_ts[1:]))
+        assert last_seens == sorted(set(last_seens))  # strictly advancing
+        assert rig.repo.list_trucks()[0].last_seen > base + timedelta(seconds=9)
     finally:
         rig.close()
