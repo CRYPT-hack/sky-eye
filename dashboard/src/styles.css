@@ -23,7 +23,8 @@
     .section         block inside a page, with a .section-title heading
     .stack           vertical flow; set --stack-gap to change the gap
     .card            surface panel (padded column); .card-media is an edge-to-edge
-                     4:3 image area (first child), .card-title, .card-meta;
+                     4:3 image area (first child; the image fills it, cropped to
+                     fit), .card-title, .card-meta;
                      .card--link makes the whole card a link;
                      .is-new rings a newly arrived truck once
     .stats, .stat    row of stat tiles and one tile: .stat-label, .stat-value
@@ -45,6 +46,8 @@
     .stream          16:9 black video frame; .stream-message overlays text on it;
                      .stream--bleed spans the full screen width on phones (only as a
                      direct child of .page)
+    .detail-media    a truck's full frame or clip on its detail page; add
+                     .detail-crop for the close-up, scaled up in a 4:3 box
     .empty           empty, placeholder or error state panel
     .muted  .visually-hidden
 */
@@ -394,17 +397,22 @@ a {
   overflow: hidden;
 }
 
+/* min-height: 0 lets the flex column keep the 4:3 box: a tall crop would
+   otherwise stretch it to the image's own height. The image fills the box. */
 .card-media {
   margin: calc(-1 * var(--space-4)) calc(-1 * var(--space-4)) var(--space-1);
   aspect-ratio: 4 / 3;
+  min-height: 0;
+  overflow: hidden;
   background: var(--sunken);
 }
 
 .card-media img,
 .card-media video {
+  display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
 }
 
 .card-title {

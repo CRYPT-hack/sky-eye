@@ -64,6 +64,24 @@ function oversizedWidths(source: string): string[] {
   return found;
 }
 
+/** Body of the first rule whose selector list contains exactly `selector`. */
+function rule(source: string, selector: string): string {
+  for (const match of source.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    const selectors = match[1].split(",").map((s) => s.trim().replace(/\s+/g, " "));
+    if (selectors.includes(selector)) return match[2];
+  }
+  throw new Error(`no rule for ${selector}`);
+}
+
+function declarations(body: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of body.split(";")) {
+    const i = part.indexOf(":");
+    if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+  }
+  return out;
+}
+
 function rootBlock(source: string): string {
   const match = /(?:^|[}\s]):root\s*\{([^}]*)\}/.exec(source);
   return match ? match[1] : "";
@@ -137,6 +155,18 @@ describe("styles.css", () => {
     const body = /(?:^|[}\s,])body\s*\{([^}]*)\}/.exec(code)?.[1] ?? "";
     expect(body).toMatch(/background(?:-color)?\s*:/);
     expect(code).toMatch(/--font:\s*system-ui/);
+  });
+
+  test("every card keeps its 4:3 media box, whatever the image size", () => {
+    const code = outsideMedia(stripComments(css));
+    const media = declarations(rule(code, ".card-media"));
+    expect(media["aspect-ratio"]).toBe("4 / 3");
+    expect(media["min-height"]).toBe("0");
+    expect(media["overflow"]).toBe("hidden");
+    const img = declarations(rule(code, ".card-media img"));
+    expect(img["object-fit"]).toBe("cover");
+    expect(img["width"]).toBe("100%");
+    expect(img["height"]).toBe("100%");
   });
 
   test("uses no web fonts and loads nothing from other hosts", () => {

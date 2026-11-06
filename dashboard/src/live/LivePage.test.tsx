@@ -27,7 +27,7 @@ async function setup(trucks = [makeTruck(1)]) {
       <LivePage connect={fake.connect} />
     </ApiProvider>,
   );
-  await waitFor(() => expect(screen.getAllByAltText(/^Truck #/).length).toBe(trucks.length));
+  await waitFor(() => expect(screen.getAllByText(/^Truck #\d+$/).length).toBe(trucks.length));
   return { client, fake };
 }
 
@@ -35,7 +35,7 @@ test("shows one card per truck, with the updated score", async () => {
   const { fake } = await setup();
   act(() => fake.send({ type: "truck.new", truck: makeTruck(1) }));
   act(() => fake.send({ type: "truck.updated", truck: makeTruck(1, { best_score: 0.95 }) }));
-  expect(screen.getAllByAltText("Truck #1")).toHaveLength(1);
+  expect(screen.getAllByText("Truck #1")).toHaveLength(1);
   expect(screen.getByText("95%")).toBeInTheDocument();
 });
 
@@ -95,7 +95,7 @@ test("stream image carries the client stream url", async () => {
 test("new truck card is highlighted, existing one is not", async () => {
   const { fake } = await setup();
   act(() => fake.send({ type: "truck.new", truck: makeTruck(2) }));
-  const card = (id: number) => screen.getByAltText(`Truck #${id}`).closest("a")!;
+  const card = (id: number) => screen.getByText(`Truck #${id}`).closest("a")!;
   expect(card(2)).toHaveClass("is-new");
   expect(card(1)).not.toHaveClass("is-new");
 });

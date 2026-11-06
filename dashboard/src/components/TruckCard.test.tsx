@@ -6,8 +6,8 @@ import TruckCard from "./TruckCard";
 const media = (p: string) => `${p}?token=t`;
 
 test("links to the detail page and shows crop, score and duration", () => {
-  render(<TruckCard truck={makeTruck(7)} mediaUrl={media} />);
-  const img = screen.getByAltText("Truck #7");
+  const { container } = render(<TruckCard truck={makeTruck(7)} mediaUrl={media} />);
+  const img = container.querySelector("img")!;
   expect(img).toHaveAttribute("src", "/media/c7.jpg?token=t");
   expect(img).toHaveAttribute("loading", "lazy");
   expect(img.closest("a")).toHaveAttribute("href", "#/trucks/7");
@@ -22,7 +22,18 @@ test("shows a clip badge when a clip exists", () => {
 });
 
 test("no crop: no image, still a card", () => {
-  render(<TruckCard truck={makeTruck(7, { crop_url: null })} mediaUrl={media} />);
-  expect(screen.queryByAltText("Truck #7")).not.toBeInTheDocument();
+  const { container } = render(
+    <TruckCard truck={makeTruck(7, { crop_url: null })} mediaUrl={media} />,
+  );
+  expect(container.querySelector("img")).toBeNull();
   expect(screen.getByText("Truck #7")).toBeInTheDocument();
+});
+
+test("the crop is decorative: the card title alone names the truck", () => {
+  const { container } = render(<TruckCard truck={makeTruck(7)} mediaUrl={media} />);
+  expect(container.querySelector("img")).toHaveAttribute("alt", "");
+  const link = screen.getByRole("link", {
+    name: (name) => name.startsWith("Truck #7") && !name.includes("Truck #7", 1),
+  });
+  expect(link).toHaveAttribute("href", "#/trucks/7");
 });

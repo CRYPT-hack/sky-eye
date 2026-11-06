@@ -18,9 +18,8 @@ export default function TruckCard({ truck, mediaUrl, compact = false, isNew = fa
       href={href({ page: "truck", id: truck.id })}
     >
       <div className="card-media">
-        {truck.crop_url && (
-          <img src={mediaUrl(truck.crop_url)} alt={`Truck #${truck.id}`} loading="lazy" />
-        )}
+        {/* Decorative here: the card title already names the truck. */}
+        {truck.crop_url && <img src={mediaUrl(truck.crop_url)} alt="" loading="lazy" />}
       </div>
       <div className="card-title">Truck #{truck.id}</div>
       <div className="card-meta">
