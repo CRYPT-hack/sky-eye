@@ -23,7 +23,7 @@ function Fact({ label, value }: { label: string; value: string | number }) {
 }
 
 export default function StatusPage() {
-  const { client, token, reportUnauthorized } = useApi();
+  const { client, authEpoch, reportUnauthorized } = useApi();
   const [info, setInfo] = useState<Info | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
   const [infoError, setInfoError] = useState<string | null>(null);
@@ -115,7 +115,7 @@ export default function StatusPage() {
       document.removeEventListener("visibilitychange", sync);
       stop();
     };
-  }, [client, token, fail]);
+  }, [client, authEpoch, fail]);
 
   // A pending save must not fire after the page is gone.
   useEffect(

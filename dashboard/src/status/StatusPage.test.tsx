@@ -176,6 +176,24 @@ test("saving token retries", async () => {
   expect(screen.getByText("0.2.0")).toBeInTheDocument();
 });
 
+test("saving the same token again retries, and asks again if it is still refused", async () => {
+  const { c } = setup({ info: new ApiError(401, "unauthorized") });
+  await flush();
+  expect(c.getInfo).toHaveBeenCalledTimes(1);
+  fireEvent.change(screen.getByLabelText("Access token"), { target: { value: "t" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" })); // the token it already had
+  await flush();
+  expect(c.getInfo).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("dialog", { name: "Access token required" })).toBeInTheDocument();
+  c.getInfo.mockResolvedValue(INFO);
+  fireEvent.change(screen.getByLabelText("Access token"), { target: { value: "t" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await flush();
+  expect(c.getInfo).toHaveBeenCalledTimes(3);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.getByText("0.2.0")).toBeInTheDocument();
+});
+
 test("older in-flight save cannot overwrite a newer choice", async () => {
   const { c } = setup();
   let resolve06!: (r: Runtime) => void;

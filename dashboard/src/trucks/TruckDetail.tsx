@@ -13,7 +13,7 @@ type State =
   | { kind: "error" };
 
 export default function TruckDetail({ id }: { id: number }) {
-  const { client, token, reportUnauthorized } = useApi();
+  const { client, authEpoch, reportUnauthorized } = useApi();
   const [state, setState] = useState<State>({ kind: "loading" });
   const [retry, setRetry] = useState(0);
 
@@ -34,7 +34,7 @@ export default function TruckDetail({ id }: { id: number }) {
     return () => {
       cancelled = true;
     };
-  }, [client, id, token, retry, reportUnauthorized]);
+  }, [client, id, authEpoch, retry, reportUnauthorized]);
 
   const back = (
     <div>

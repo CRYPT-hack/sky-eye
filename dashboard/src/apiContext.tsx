@@ -13,7 +13,14 @@ import { loadToken, saveToken } from "./api/token";
 export interface ApiContextValue {
   client: ApiClient;
   token: string | null;
+  /** Saves the token and starts a new auth epoch, even when the value is unchanged. */
   setToken(t: string | null): void;
+  /**
+   * Goes up by one on every setToken call. Data effects and the live connection
+   * depend on it, so saving a token (even the same one again) always refetches and
+   * reconnects, and a page that is still refused asks again.
+   */
+  authEpoch: number;
   unauthorized: boolean;
   reportUnauthorized(): void;
 }
@@ -32,6 +39,7 @@ export function ApiProvider({ children, client, initialToken }: ApiProviderProps
     initialToken !== undefined ? initialToken : loadToken(),
   );
   const [unauthorized, setUnauthorized] = useState(false);
+  const [authEpoch, setAuthEpoch] = useState(0);
   // The client reads the token through a ref so it always sees the current one.
   const tokenRef = useRef(token);
   tokenRef.current = token;
@@ -42,6 +50,7 @@ export function ApiProvider({ children, client, initialToken }: ApiProviderProps
     saveToken(t);
     tokenRef.current = t;
     setTokenState(t);
+    setAuthEpoch((n) => n + 1);
     setUnauthorized(false);
   }, []);
   const reportUnauthorized = useCallback(() => setUnauthorized(true), []);
@@ -51,10 +60,11 @@ export function ApiProvider({ children, client, initialToken }: ApiProviderProps
       client: client ?? ownClient,
       token,
       setToken,
+      authEpoch,
       unauthorized,
       reportUnauthorized,
     }),
-    [client, ownClient, token, setToken, unauthorized, reportUnauthorized],
+    [client, ownClient, token, setToken, authEpoch, unauthorized, reportUnauthorized],
   );
 
   return <ApiContext.Provider value={value}>{children}</ApiContext.Provider>;

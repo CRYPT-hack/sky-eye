@@ -113,6 +113,28 @@ test("changing the token refetches and reconnects", async () => {
   expect(fake.stops[0]).toHaveBeenCalled();
 });
 
+test("saving the same token again refetches and reconnects each time", async () => {
+  const client = makeClient([]);
+  const fake = makeConnect();
+  const { result } = renderHook(
+    () => ({ live: useLive(client, { connect: fake.connect }), api: useApi() }),
+    { wrapper: wrap(client) },
+  );
+  await waitFor(() => expect(client.listTrucks).toHaveBeenCalledTimes(1));
+  act(() => fake.state("unauthorized")); // the socket stopped on 4401
+  expect(result.current.api.unauthorized).toBe(true);
+
+  act(() => result.current.api.setToken("same"));
+  await waitFor(() => expect(client.listTrucks).toHaveBeenCalledTimes(2));
+  expect(fake.calls).toHaveLength(2);
+  expect(fake.stops[0]).toHaveBeenCalled();
+
+  act(() => result.current.api.setToken("same"));
+  await waitFor(() => expect(client.listTrucks).toHaveBeenCalledTimes(3));
+  expect(fake.calls).toHaveLength(3);
+  expect(fake.stops[1]).toHaveBeenCalled();
+});
+
 test("stops the connection on unmount", async () => {
   const client = makeClient([]);
   const fake = makeConnect();

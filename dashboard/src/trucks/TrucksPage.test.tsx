@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
-import { ApiProvider } from "../apiContext";
+import { ApiProvider, useApi } from "../apiContext";
 import { ApiError } from "../api/client";
 import { makeClient, makeTruck } from "../live/fakes";
 import type { Truck } from "../api/types";
@@ -78,7 +78,7 @@ test("ignores a stale response after the filter changes", async () => {
   expect(screen.getByText("Truck #7")).toBeInTheDocument();
 });
 
-test("401 reports unauthorized; other errors retry", async () => {
+test("a server error shows a retry banner that refetches", async () => {
   const client = makeClient();
   const mock = client.listTrucks as ReturnType<typeof vi.fn>;
   mock.mockRejectedValueOnce(new ApiError(500, "boom"));
@@ -102,4 +102,51 @@ test("load more skips trucks already shown", async () => {
   expect(screen.getAllByText("Truck #45")).toHaveLength(1);
   expect(errors).not.toHaveBeenCalled();
   errors.mockRestore();
+});
+
+function Gate() {
+  const { unauthorized, setToken } = useApi();
+  return (
+    <>
+      {unauthorized && <p>token prompt</p>}
+      <button type="button" onClick={() => setToken("t")}>
+        Save token t
+      </button>
+    </>
+  );
+}
+
+test("401 reports unauthorized instead of an error banner", async () => {
+  const client = makeClient();
+  (client.listTrucks as ReturnType<typeof vi.fn>).mockRejectedValue(new ApiError(401, "no"));
+  render(
+    <ApiProvider client={client} initialToken="t">
+      <TrucksPage />
+      <Gate />
+    </ApiProvider>,
+  );
+  expect(await screen.findByText("token prompt")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText("No trucks saved for this range")).not.toBeInTheDocument();
+});
+
+test("saving the same token again refetches each time", async () => {
+  const client = makeClient();
+  const mock = client.listTrucks as ReturnType<typeof vi.fn>;
+  mock.mockRejectedValue(new ApiError(401, "no"));
+  render(
+    <ApiProvider client={client} initialToken="t">
+      <TrucksPage />
+      <Gate />
+    </ApiProvider>,
+  );
+  await screen.findByText("token prompt");
+  expect(mock).toHaveBeenCalledTimes(1);
+  await userEvent.click(screen.getByRole("button", { name: "Save token t" }));
+  await waitFor(() => expect(mock).toHaveBeenCalledTimes(2));
+  expect(await screen.findByText("token prompt")).toBeInTheDocument();
+  mock.mockResolvedValue({ trucks: [makeTruck(4)], limit: 48, offset: 0 });
+  await userEvent.click(screen.getByRole("button", { name: "Save token t" }));
+  expect(await screen.findByText("Truck #4")).toBeInTheDocument();
+  expect(mock).toHaveBeenCalledTimes(3);
 });

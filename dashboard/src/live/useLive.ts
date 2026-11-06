@@ -31,7 +31,7 @@ function merge(list: Truck[], incoming: Truck[], keep: number): Truck[] {
 }
 
 export function useLive(client: ApiClient, opts: UseLiveOptions = {}): LiveData {
-  const { token, reportUnauthorized } = useApi();
+  const { authEpoch, reportUnauthorized } = useApi();
   const connect = opts.connect ?? connectLive;
   const keep = opts.keep ?? 20;
 
@@ -96,8 +96,9 @@ export function useLive(client: ApiClient, opts: UseLiveOptions = {}): LiveData 
       cancelled = true;
       stop();
     };
-    // `token` is a dependency on purpose: a new token means refetch and reconnect.
-  }, [client, connect, keep, token]);
+    // `authEpoch` is a dependency on purpose: every saved token (even the same one
+    // again) means refetch and reconnect.
+  }, [client, connect, keep, authEpoch]);
 
   return { status, trucks, state };
 }

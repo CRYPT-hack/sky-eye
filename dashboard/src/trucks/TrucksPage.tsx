@@ -14,7 +14,7 @@ interface Range {
 }
 
 export default function TrucksPage() {
-  const { client, token, reportUnauthorized } = useApi();
+  const { client, authEpoch, unauthorized, reportUnauthorized } = useApi();
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [applied, setApplied] = useState<Range>({ from: "", to: "" });
@@ -62,7 +62,7 @@ export default function TrucksPage() {
     return () => {
       requestId.current++;
     };
-  }, [fetchPage, applied, token, retry]);
+  }, [fetchPage, applied, authEpoch, retry]);
 
   const clear = () => {
     setFrom("");
@@ -134,7 +134,7 @@ export default function TrucksPage() {
         </div>
       )}
 
-      {!loading && !failed && trucks.length === 0 && (
+      {!loading && !failed && !unauthorized && trucks.length === 0 && (
         <div className="empty">
           <p>No trucks saved for this range</p>
         </div>
