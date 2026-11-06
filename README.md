@@ -21,13 +21,15 @@ over a small HTTP API with a live MJPEG stream.
 2. Copy the example config: `cp config.example.yaml config.yaml`
 3. Optional, only for token auth: copy `.env.example` to `.env` next to `config.yaml`
    and set `SKYEYE_API_TOKEN` to a long random string.
-4. Put a drone clip at `samples/drone.mp4` (or change `source.path` in `config.yaml`).
-5. Optional: check the setup without starting anything (also downloads the weights):
+4. Build the website once: `cd dashboard`, `npm ci`, `npm run build` (needs Node 24;
+   the engine serves `dashboard/dist/` and cannot show the site without it).
+5. Put a drone clip at `samples/drone.mp4` (or change `source.path` in `config.yaml`).
+6. Optional: check the setup without starting anything (also downloads the weights):
    `uv run python -m engine --config config.yaml --check`
-6. Run: `uv run python -m engine --config config.yaml`
-7. Open the printed `Dashboard: http://<ip>:8000/` URL. Until the dashboard (Plan 2)
-   lands, `/` only returns a small JSON document; use `/stream.mjpg` for the live
-   annotated video, `/api/trucks` for detected trucks and `/api/status` for FPS.
+7. Run: `uv run python -m engine --config config.yaml`
+8. Open the printed `Dashboard: http://<ip>:8000/` URL. The raw endpoints also work:
+   `/stream.mjpg` for the live annotated video, `/api/trucks` for detected trucks and
+   `/api/status` for FPS.
 
 Evidence is written to `data/media/<date>/` (`_full.jpg`, `_crop.jpg`, `.mp4` per
 truck); logs (including the HTTP server's) to `data/logs/sky-eye.log`. Press Ctrl+C
