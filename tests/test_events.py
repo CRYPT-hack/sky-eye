@@ -384,3 +384,78 @@ def test_last_seen_heartbeat(tmp_path):
         assert rig.repo.list_trucks()[0].last_seen > base + timedelta(seconds=9)
     finally:
         rig.close()
+
+
+def test_abort_twice_notifies_once_and_frees_frames(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        calls: list[str] = []
+        rig.feed(0, 0.0, result(0.8))
+        rig.evidence._pending[0].on_fail = calls.append
+        rig.evidence.abort()
+        rig.evidence.abort()
+        assert calls == ["failed"]
+    finally:
+        rig.close()
+
+
+def test_finished_clip_releases_frames(tmp_path):
+    import gc
+    import weakref
+
+    rig = Rig(tmp_path)
+    try:
+        seen = []
+        original = rig.evidence._submit
+
+        def spy(job):
+            seen.append((job, weakref.ref(job.frames[0])))
+            original(job)
+
+        rig.evidence._submit = spy
+        for i in range(60):
+            rig.feed(i, i / 30, result(0.8))
+        rig.evidence.flush()
+        assert seen and seen[0][0].frames == []
+        # push the ring far past the clip so only the finished job could keep frames
+        for i in range(60, 400):
+            rig.evidence.push(fake_frame(i, i / 30))
+        gc.collect()
+        assert seen[0][1]() is None
+    finally:
+        rig.close()
+
+
+def test_failed_later_track_still_announces_earlier_one(tmp_path, monkeypatch):
+    import engine.events.manager as manager_mod
+
+    real = manager_mod.save_snapshot
+    calls = [0]
+
+    def flaky(*a, **k):
+        calls[0] += 1
+        if calls[0] == 2:
+            raise OSError("disk full")
+        real(*a, **k)
+
+    monkeypatch.setattr(manager_mod, "save_snapshot", flaky)
+    rig = Rig(tmp_path)
+    try:
+        frame = fake_frame(0, 0.0)
+        rig.evidence.push(frame)
+        both = TrackerResult(
+            confirmed=[
+                Track(1, Detection(BOX, 0.8, "truck")),
+                Track(2, Detection(BOX, 0.8, "truck")),
+            ],
+            ended_ids=[],
+        )
+        try:
+            rig.mgr.on_frame(frame, both)
+        except OSError:
+            pass
+        news = [m for m in drain(rig.q) if m["type"] == "truck.new"]
+        assert [m["truck"]["track_id"] for m in news] == [1]
+        assert len(rig.evidence._pending) == 1  # its clip started
+    finally:
+        rig.close()

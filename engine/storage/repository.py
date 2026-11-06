@@ -97,14 +97,22 @@ class TruckRepository:
         # called with self._lock held; idempotent
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(trucks)")}
         if "clip_status" not in cols:
-            self._conn.execute(
-                "ALTER TABLE trucks ADD COLUMN clip_status TEXT NOT NULL DEFAULT 'pending'"
-            )
-            # rows from before the column existed are all settled: a clip or no clip
-            self._conn.execute(
-                "UPDATE trucks SET clip_status = "
-                "CASE WHEN clip_path IS NOT NULL THEN 'saved' ELSE 'failed' END"
-            )
+            # one transaction: a crash between the two statements must not leave
+            # old rows "pending" forever
+            self._conn.execute("BEGIN")
+            try:
+                self._conn.execute(
+                    "ALTER TABLE trucks ADD COLUMN clip_status TEXT NOT NULL DEFAULT 'pending'"
+                )
+                # rows from before the column existed are all settled: a clip or no clip
+                self._conn.execute(
+                    "UPDATE trucks SET clip_status = "
+                    "CASE WHEN clip_path IS NOT NULL THEN 'saved' ELSE 'failed' END"
+                )
+            except BaseException:
+                self._conn.rollback()
+                raise
+            self._conn.commit()
 
     def create_run(self, source: str, config_json: str) -> int:
         with self._lock:

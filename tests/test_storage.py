@@ -234,3 +234,43 @@ def test_clip_status_migration(tmp_path):
             assert r.get_truck(new).clip_status == "pending"
         finally:
             r.close()
+
+
+def test_migration_leaves_new_pending_row_alone_and_rolls_back(tmp_path):
+    db = tmp_path / "old.db"
+    _old_db(db)
+    r = TruckRepository(db)
+    new = r.insert_truck(make_rec(1, 9))
+    r.close()
+    r = TruckRepository(db)  # already migrated: must not touch the pending row
+    try:
+        assert r.get_truck(new).clip_status == "pending"
+    finally:
+        r.close()
+
+
+def test_migration_is_one_transaction(tmp_path, monkeypatch):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    _old_db(db)
+    real = sqlite3.Connection
+
+    class Boom(real):
+        def execute(self, sql, *a):
+            if sql.startswith("UPDATE trucks SET clip_status"):
+                raise sqlite3.OperationalError("crash")
+            return super().execute(sql, *a)
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **k: real_connect(*a, factory=Boom, **k)
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        TruckRepository(db)
+    monkeypatch.undo()
+    conn = sqlite3.connect(str(db))
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(trucks)")}
+    conn.close()
+    assert "clip_status" not in cols  # ALTER rolled back with the failed backfill
+

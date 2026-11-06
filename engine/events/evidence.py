@@ -202,6 +202,7 @@ class _Job:
     path: Path
     on_done: Callable[[Path], None]
     on_fail: Callable[[str], None] | None = None
+    dropped: bool = False  # abort() already reported this job as failed
     frames: list[Frame] = field(default_factory=list)
 
 
@@ -296,7 +297,7 @@ class EvidenceRecorder:
         status: str | None = None
         with self._lock:
             if self._aborted:
-                log.info("clip %s skipped: the engine is stopping", key)
+                log.info("clip %s dropped (failed): the engine is stopping", key)
                 status = "failed"
             else:
                 self._prune_futures()
@@ -359,16 +360,19 @@ class EvidenceRecorder:
             dropped_jobs = list(self._pending)
             self._pending.clear()
             for future in self._futures:
-                if future.cancel():
+                if future.cancel():  # True again for an already-cancelled future
                     job = self._job_of.get(future)
-                    if job is not None:
+                    if job is not None and not job.dropped:
                         dropped_jobs.append(job)
+            for job in dropped_jobs:
+                job.dropped = True
         if dropped_jobs:
             log.info(
                 "stopping: dropped %d clip(s) that had not started encoding", len(dropped_jobs)
             )
         for job in dropped_jobs:
             self._notify_fail(job, "failed")
+            job.frames = []
 
     def close(self, drop_pending: bool = False) -> None:
         """Flush all clips (default), or with drop_pending=True abort() first."""
@@ -386,6 +390,12 @@ class EvidenceRecorder:
         self._job_of[future] = job
 
     def _run(self, job: _Job) -> None:
+        try:
+            self._run_job(job)
+        finally:
+            job.frames = []  # _job_of keeps the job around: do not keep its frames alive
+
+    def _run_job(self, job: _Job) -> None:
         if not job.frames:
             log.warning("clip %s has no frames; skipped", job.key)
             self._notify_fail(job, "failed")
