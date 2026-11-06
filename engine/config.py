@@ -4,9 +4,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 
 class ConfigError(Exception):
@@ -17,19 +19,87 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+STREAM_SCHEMES = ("rtsp", "rtsps", "rtmp", "rtmps", "srt", "udp", "http", "https")
+_GO2RTC_SCHEMES = ("rtsp", "rtsps")
+
+
+def _url_problem(url: str, schemes: tuple[str, ...]) -> str | None:
+    """Why `url` is not a usable stream URL, or None. Never repeats the URL:
+    it may contain a password."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "not a valid URL"
+    if "://" not in url or not parts.scheme:
+        return f"needs a scheme, one of: {', '.join(schemes)} (e.g. {schemes[0]}://host/path)"
+    if parts.scheme not in schemes:
+        return f"unsupported scheme {parts.scheme!r}; use one of: {', '.join(schemes)}"
+    if not parts.netloc:
+        return "needs a host, e.g. rtsp://192.168.1.10:8554/live"
+    return None
+
+
+class Go2rtcConfig(_Model):
+    """A stream relayed by a local go2rtc server, read from its RTSP output."""
+
+    rtsp_base: str = "rtsp://127.0.0.1:8554"
+    name: str | None = None  # the go2rtc stream name
+
+
 class SourceConfig(_Model):
-    type: Literal["file", "capture"] = "file"
+    type: Literal["file", "capture", "stream", "go2rtc"] = "file"
     path: Path | None = None
     device: int = Field(default=0, ge=0)
+    url: str | None = None  # type: stream
+    go2rtc: Go2rtcConfig = Field(default_factory=Go2rtcConfig)  # type: go2rtc
     realtime: bool = True
     loop: bool = False
 
     @model_validator(mode="after")
-    def _file_needs_existing_path(self) -> SourceConfig:
+    def _check_type_fields(self) -> SourceConfig:
         # path may be left unset (e.g. supplied later by a CLI override)
         if self.type == "file" and self.path is not None and not self.path.is_file():
             raise ValueError(f"file source path does not exist: {self.path}")
+        problem = self.stream_problem()
+        if problem is not None:
+            loc, msg = problem
+            # A ValidationError raised here keeps its own loc, so the message
+            # names the field (source.url, source.go2rtc.name), not just "source".
+            raise ValidationError.from_exception_data(
+                type(self).__name__,
+                [
+                    InitErrorDetails(
+                        type=PydanticCustomError("stream_source", msg), loc=loc, input=None
+                    )
+                ],
+            )
         return self
+
+    def stream_problem(self) -> tuple[tuple[str, ...], str] | None:
+        """(field path below source, message) if a stream/go2rtc source is misconfigured."""
+        if self.type == "stream":
+            if not self.url:
+                return ("url",), "required for type: stream"
+            problem = _url_problem(self.url, STREAM_SCHEMES)
+            return None if problem is None else (("url",), problem)
+        if self.type == "go2rtc":
+            if not self.go2rtc.name:
+                return ("go2rtc", "name"), "required for type: go2rtc"
+            problem = _url_problem(self.go2rtc.rtsp_base, _GO2RTC_SCHEMES)
+            return None if problem is None else (("go2rtc", "rtsp_base"), problem)
+        return None
+
+    def stream_url(self) -> str:
+        """The URL a stream/go2rtc source reads; ConfigError naming the bad field."""
+        if self.type not in ("stream", "go2rtc"):
+            raise ConfigError(f"source.type: {self.type} is not a stream source")
+        problem = self.stream_problem()
+        if problem is not None:
+            loc, msg = problem
+            raise ConfigError(f"source.{'.'.join(loc)}: {msg}")
+        if self.type == "go2rtc":
+            return f"{self.go2rtc.rtsp_base.rstrip('/')}/{self.go2rtc.name}"
+        return str(self.url)
 
 
 class DetectorConfig(_Model):

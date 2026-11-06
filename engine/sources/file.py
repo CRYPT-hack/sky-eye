@@ -73,3 +73,7 @@ class FileSource:
     @property
     def ended(self) -> bool:
         return self._ended
+
+    @property
+    def state(self) -> str:
+        return "running"

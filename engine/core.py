@@ -49,6 +49,11 @@ class VideoSource(Protocol):
     @property
     def ended(self) -> bool: ...
 
+    @property
+    def state(self) -> str:
+        """Either "running" or "reconnecting" (a live source that lost its input)."""
+        ...
+
 
 class Detector(Protocol):
     def detect(self, image: np.ndarray) -> list[Detection]: ...
