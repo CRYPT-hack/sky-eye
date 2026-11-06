@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 
+import pytest
+
 from engine.alerts.core import AlertBatch, AlertDispatcher
 from engine.events.bus import EventBus
 
@@ -16,13 +18,27 @@ def new(i: int) -> dict:
     return {"api": 1, "type": "truck.new", "truck": truck(i)}
 
 
-def wait_until(pred, timeout: float = 3.0) -> bool:
+def wait_until(pred, timeout: float = 5.0) -> bool:
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if pred():
             return True
         time.sleep(0.005)
     return pred()
+
+
+class FakeClock:
+    def __init__(self, t: float = 1000.0) -> None:
+        self.t = t
+        self._lock = threading.Lock()
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self.t
+
+    def advance(self, s: float) -> None:
+        with self._lock:
+            self.t += s
 
 
 class Fake:
@@ -42,12 +58,39 @@ class Fake:
         self.batches.append(batch)
 
 
-def make(notifiers, **kw):
-    bus = EventBus()
-    kw.setdefault("enabled", lambda n: True)
-    d = AlertDispatcher(bus, notifiers, **kw)
-    d.start()
-    return bus, d
+def ids(n: Fake) -> list[list[int]]:
+    return [[t["id"] for t in b.trucks] for b in n.batches]
+
+
+def pending(d: AlertDispatcher, i: int = 0) -> int:
+    return len(d._channels[i].pending)
+
+
+def drop_msgs(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "events dropped" in r.getMessage()]
+
+
+@pytest.fixture
+def clock():
+    return FakeClock()
+
+
+@pytest.fixture
+def running():
+    made: list[AlertDispatcher] = []
+
+    def make(notifiers, **kw):
+        bus = EventBus()
+        kw.setdefault("enabled", lambda n: True)
+        kw.setdefault("cooldown_s", 10.0)
+        d = AlertDispatcher(bus, notifiers, **kw)
+        d.start()
+        made.append(d)
+        return bus, d
+
+    yield make
+    for d in made:
+        d.stop(timeout=1.0)
 
 
 def test_batch_titles():
@@ -56,97 +99,88 @@ def test_batch_titles():
     assert AlertBatch((), is_test=True).title() == "Test alert from sky-eye"
 
 
-def test_first_truck_sent_immediately():
+def test_queue_max_must_be_positive():
+    with pytest.raises(ValueError):
+        AlertDispatcher(EventBus(), [], enabled=lambda n: True, queue_max=0)
+
+
+def test_first_truck_sent_immediately(running, clock):
     n = Fake("desktop")
-    bus, d = make([n], cooldown_s=10.0)
-    try:
-        bus.publish(new(1))
-        assert wait_until(lambda: len(n.batches) == 1)
-        assert [t["id"] for t in n.batches[0].trucks] == [1]
-    finally:
-        d.stop()
+    bus, d = running([n], clock=clock)
+    bus.publish(new(1))
+    assert wait_until(lambda: ids(n) == [[1]])
 
 
-def test_ignores_other_event_types():
+def test_ignores_other_event_types(running, clock):
     n = Fake("desktop")
-    bus, d = make([n])
-    try:
-        bus.publish({"api": 1, "type": "truck.updated", "truck": truck(1)})
-        time.sleep(0.2)
-        assert n.batches == []
-    finally:
-        d.stop()
+    bus, d = running([n], clock=clock)
+    bus.publish({"api": 1, "type": "truck.updated", "truck": truck(1)})
+    bus.publish(new(2))
+    assert wait_until(lambda: ids(n) == [[2]])
 
 
-def test_burst_is_grouped_per_cooldown():
+def test_burst_is_grouped_per_cooldown(running, clock):
     n = Fake("desktop")
-    bus, d = make([n], cooldown_s=0.4)
-    try:
-        for i in range(20):
-            bus.publish(new(i))
-        assert wait_until(lambda: len(n.batches) == 2)
-        assert [len(b.trucks) for b in n.batches] == [1, 19]
-        assert n.batches[1].title() == "19 new trucks"
-    finally:
-        d.stop()
+    bus, d = running([n], clock=clock)
+    for i in range(20):
+        bus.publish(new(i))
+    assert wait_until(lambda: len(n.batches) == 1 and pending(d) == 19)
+    clock.advance(10)
+    assert wait_until(lambda: len(n.batches) == 2)
+    assert [len(b.trucks) for b in n.batches] == [1, 19]
+    assert n.batches[1].title() == "19 new trucks"
 
 
-def test_cooldown_is_per_channel():
+def test_cooldown_is_per_channel(running, clock):
     desk, tele = Fake("desktop"), Fake("telegram")
     on = {"desktop": False, "telegram": True}
-    bus, d = make([desk, tele], enabled=lambda n: on[n], cooldown_s=0.5)
-    try:
-        bus.publish(new(1))
-        assert wait_until(lambda: len(tele.batches) == 1)
-        assert desk.batches == []
-        on["desktop"] = True
-        bus.publish(new(2))
-        assert wait_until(lambda: len(desk.batches) == 1)  # not delayed by telegram
-        assert [t["id"] for t in desk.batches[0].trucks] == [2]
-        assert len(tele.batches) == 1  # telegram still cooling down
-        assert wait_until(lambda: len(tele.batches) == 2)
-    finally:
-        d.stop()
+    bus, d = running([desk, tele], enabled=lambda n: on[n], clock=clock)
+    bus.publish(new(1))
+    assert wait_until(lambda: ids(tele) == [[1]])
+    on["desktop"] = True
+    bus.publish(new(2))
+    assert wait_until(lambda: ids(desk) == [[2]] and pending(d, 1) == 1)
+    assert len(tele.batches) == 1  # telegram still cooling down
+    clock.advance(10)
+    assert wait_until(lambda: ids(tele) == [[1], [2]])
+    assert ids(desk) == [[2]]
 
 
-def test_disabled_channel_skipped():
+def test_disabled_channel_skipped(running, clock):
     n = Fake("mqtt")
-    bus, d = make([n], enabled=lambda name: False, cooldown_s=0.05)
-    try:
-        bus.publish(new(1))
-        time.sleep(0.3)
-        assert n.batches == []
-        assert n.attempts == 0
-    finally:
-        d.stop()
+    calls: list[str] = []
+
+    def enabled(name: str) -> bool:
+        calls.append(name)
+        return False
+
+    bus, d = running([n], enabled=enabled, clock=clock)
+    bus.publish(new(1))
+    assert wait_until(lambda: calls == ["mqtt"])
+    assert n.batches == [] and n.attempts == 0
 
 
-def test_retries_then_drops(caplog):
+def test_retries_then_drops(running, clock, caplog):
     caplog.set_level(logging.INFO)
     n = Fake("telegram", fail=4)
     sleeps: list[float] = []
-    bus, d = make([n], cooldown_s=0.05, sleep=sleeps.append)
-    try:
-        bus.publish(new(1))
-        assert wait_until(lambda: n.attempts == 4)
-        assert wait_until(lambda: any(r.levelno == logging.ERROR for r in caplog.records))
-        assert sleeps == [1.0, 2.0, 4.0]
-        assert n.batches == []
-        bus.publish(new(2))
-        assert wait_until(lambda: len(n.batches) == 1)
-        assert [t["id"] for t in n.batches[0].trucks] == [2]
-        err = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert "telegram" in err[0].getMessage()
-        text = caplog.text
-        assert "SECRET" not in text and "token=" not in text
-    finally:
-        d.stop()
+    bus, d = running([n], clock=clock, sleep=sleeps.append)
+    bus.publish(new(1))
+    assert wait_until(lambda: any(r.levelno == logging.ERROR for r in caplog.records))
+    assert n.attempts == 4 and sleeps == [1.0, 2.0, 4.0] and n.batches == []
+    bus.publish(new(2))
+    assert wait_until(lambda: pending(d) == 1)
+    clock.advance(10)
+    assert wait_until(lambda: ids(n) == [[2]])
+    err = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "telegram" in err[0].getMessage()
+    assert "SECRET" not in caplog.text and "token=" not in caplog.text
 
 
-def test_failing_channel_never_blocks_publish():
+def test_failing_channel_never_blocks_publish(running, clock):
     gate = threading.Event()
     n = Fake("desktop", block=gate)
-    bus, d = make([n])
+    bus, d = running([n], clock=clock)
     try:
         t0 = time.monotonic()
         for i in range(50):
@@ -154,55 +188,173 @@ def test_failing_channel_never_blocks_publish():
         assert time.monotonic() - t0 < 0.05
     finally:
         gate.set()
-        d.stop()
 
 
-def test_queue_full_drops_oldest(caplog):
+def test_queue_full_drops_oldest(running, clock, caplog):
     caplog.set_level(logging.WARNING)
     gate = threading.Event()
     n = Fake("desktop", block=gate)
-    bus, d = make([n], queue_max=3, cooldown_s=0.01)
+    bus, d = running([n], queue_max=3, clock=clock)
     try:
         bus.publish(new(0))
         assert wait_until(lambda: n.attempts == 1)  # worker stalled in send
         for i in range(1, 6):
             bus.publish(new(i))
-            time.sleep(0.02)
         assert wait_until(lambda: any(r.levelno == logging.WARNING for r in caplog.records))
-        gate.set()
-        assert wait_until(lambda: sum(len(b.trucks) for b in n.batches) >= 4)
-        time.sleep(0.2)
-        ids = [t["id"] for b in n.batches for t in b.trucks]
-        assert 1 not in ids and 0 in ids and 5 in ids
-        assert "SECRET" not in caplog.text
     finally:
         gate.set()
-        d.stop()
+    clock.advance(10)
+    assert wait_until(lambda: 5 in [i for b in ids(n) for i in b])
+    delivered = [i for b in ids(n) for i in b]
+    assert 0 in delivered and 1 not in delivered  # oldest dropped, newest kept
+    assert "SECRET" not in caplog.text
 
 
-def test_send_test_ignores_cooldown():
-    n = Fake("desktop")
-    off = Fake("mqtt")
-    bus, d = make([n, off], enabled=lambda name: name == "desktop", cooldown_s=60.0)
+def test_bus_overflow_warns_with_count_rate_limited(running, clock, caplog):
+    caplog.set_level(logging.WARNING)
+    bus, d = running([Fake("desktop")], clock=clock)
+    ch = d._channels[0]
+    orig = ch.offer
+    entered, gate = threading.Event(), threading.Event()
+
+    def blocking_offer(item):
+        entered.set()
+        gate.wait(5)
+        orig(item)
+
+    ch.offer = blocking_offer
+    # stall the reader inside offer, then burst with no sleeps (sub queue holds 100)
+    bus.publish(new(0))
+    assert entered.wait(3)
+    for i in range(1, 111):
+        bus.publish(new(i))
+    gate.set()
+    assert wait_until(lambda: len(drop_msgs(caplog)) == 1)
+    assert drop_msgs(caplog) == ["alert subscription full; 10 events dropped"]
+    # second burst inside the 5 s window: no new warning until the window passes
+    assert wait_until(lambda: d._sub.qsize() == 0)
+    gate.clear()
+    entered.clear()
+    bus.publish(new(200))
+    assert entered.wait(3)
+    for i in range(201, 312):
+        bus.publish(new(i))
+    gate.set()
+    assert wait_until(lambda: d._sub.qsize() == 0)
+    time.sleep(0.3)  # let the reader loop a few times; the fake clock has not moved
+    assert len(drop_msgs(caplog)) == 1
+    clock.advance(5)
+    assert wait_until(lambda: len(drop_msgs(caplog)) == 2)
+    assert drop_msgs(caplog)[1] == "alert subscription full; 11 events dropped"
+
+
+def test_pile_up_during_slow_delivery_is_grouped(running, clock):
+    gate = threading.Event()
+    n = Fake("desktop", block=gate)
+    bus, d = running([n], clock=clock)
     try:
-        bus.publish(new(1))
-        assert wait_until(lambda: len(n.batches) == 1)
-        d.send_test()
-        assert wait_until(lambda: len(n.batches) == 2)
-        assert n.batches[1].is_test and n.batches[1].trucks == ()
-        assert off.batches == []
+        bus.publish(new(0))
+        assert wait_until(lambda: n.attempts == 1)
+        for i in range(1, 6):
+            bus.publish(new(i))
+        assert wait_until(lambda: d._channels[0].inbox.qsize() == 5)
+        clock.advance(11)  # cooldown elapsed while the send was stuck
     finally:
-        d.stop()
+        gate.set()
+    assert wait_until(lambda: len(n.batches) == 2)
+    assert ids(n) == [[0], [1, 2, 3, 4, 5]]
+
+
+def test_send_test_ignores_cooldown(running, clock):
+    n, off = Fake("desktop"), Fake("mqtt")
+    calls: list[str] = []
+
+    def enabled(name: str) -> bool:
+        calls.append(name)
+        return name == "desktop"
+
+    bus, d = running([n, off], enabled=enabled, clock=clock)
+    bus.publish(new(1))
+    assert wait_until(lambda: len(n.batches) == 1 and calls.count("mqtt") == 1)
+    d.send_test()
+    assert wait_until(lambda: len(n.batches) == 2 and calls.count("mqtt") == 2)
+    assert n.batches[1].is_test and n.batches[1].trucks == ()
+    assert off.batches == []
 
 
 def test_stop_is_prompt():
     n = Fake("desktop", fail=100)
-    bus, d = make([n])  # default interruptible sleep, retry sleeps 1s,2s,4s
+    bus = EventBus()
+    d = AlertDispatcher(bus, [n], enabled=lambda x: True)  # default interruptible sleep
+    d.start()
+    try:
+        bus.publish(new(1))
+        assert wait_until(lambda: n.attempts >= 1)
+        t0 = time.monotonic()
+        d.stop()
+        assert time.monotonic() - t0 < 1.0
+        attempts = n.attempts
+        time.sleep(0.3)
+        assert n.attempts == attempts
+    finally:
+        d.stop(timeout=1.0)
+
+
+def test_stop_warns_when_notifier_stuck(caplog):
+    caplog.set_level(logging.WARNING)
+    gate = threading.Event()
+    n = Fake("telegram", block=gate)
+    bus = EventBus()
+    d = AlertDispatcher(bus, [n], enabled=lambda x: True)
+    d.start()
+    try:
+        bus.publish(new(1))
+        assert wait_until(lambda: n.attempts == 1)
+        t0 = time.monotonic()
+        d.stop(timeout=0.5)
+        assert time.monotonic() - t0 < 1.0
+        assert any(
+            "telegram" in r.getMessage() and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
+        with pytest.raises(RuntimeError):  # old worker still alive: refuse restart
+            d.start()
+    finally:
+        gate.set()
+        d.stop(timeout=1.0)
+
+
+def test_restart_after_stop(clock):
+    n = Fake("desktop")
+    bus = EventBus()
+    d = AlertDispatcher(bus, [n], enabled=lambda x: True, cooldown_s=10.0, clock=clock)
+    d.start()
+    try:
+        bus.publish(new(1))
+        assert wait_until(lambda: ids(n) == [[1]])
+        d.stop()
+        d.start()
+        bus.publish(new(2))
+        assert wait_until(lambda: ids(n) == [[1], [2]])
+    finally:
+        d.stop(timeout=1.0)
+
+
+def test_worker_survives_raising_enabled(running, clock, caplog):
+    caplog.set_level(logging.ERROR)
+    n = Fake("desktop")
+    state = {"calls": 0}
+
+    def enabled(name: str) -> bool:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise ValueError("secret-detail")
+        return True
+
+    bus, d = running([n], enabled=enabled, clock=clock)
     bus.publish(new(1))
-    assert wait_until(lambda: n.attempts >= 1)
-    t0 = time.monotonic()
-    d.stop()
-    assert time.monotonic() - t0 < 1.0
-    attempts = n.attempts
-    time.sleep(0.3)
-    assert n.attempts == attempts
+    assert wait_until(lambda: any(r.levelno == logging.ERROR for r in caplog.records))
+    bus.publish(new(2))
+    assert wait_until(lambda: ids(n) == [[2]])
+    assert "secret-detail" not in caplog.text and "SECRET" not in caplog.text
+    assert "desktop" in caplog.text and "ValueError" in caplog.text

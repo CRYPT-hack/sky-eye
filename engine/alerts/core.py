@@ -14,11 +14,12 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from engine.events.bus import EventBus
+from engine.events.bus import EventBus, Subscription
 
 log = logging.getLogger("engine.alerts")
 
 _POLL_S = 0.1
+_DROP_WARN_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -81,30 +82,41 @@ class AlertDispatcher:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
+        if queue_max < 1:
+            raise ValueError("queue_max must be >= 1")
         self._bus = bus
+        self._notifiers = list(notifiers)
         self._enabled = enabled
         self._cooldown = cooldown_s
         self._retries = tuple(retries)
         self._queue_max = queue_max
         self._clock = clock
+        self._custom_sleep = sleep
         self._stop = threading.Event()
-        self._sleep = sleep if sleep is not None else self._interruptible_sleep
-        self._channels = [_Channel(n, queue_max) for n in notifiers]
-        self._sub: queue.Queue[dict] | None = None
+        self._channels: list[_Channel] = [_Channel(n, queue_max) for n in self._notifiers]
+        self._sub: Subscription | None = None
         self._reader: threading.Thread | None = None
 
     # -- lifecycle ---------------------------------------------------------
+    def _alive(self) -> bool:
+        threads = [self._reader] + [ch.thread for ch in self._channels]
+        return any(t is not None and t.is_alive() for t in threads)
+
     def start(self) -> None:
-        if self._reader is not None:
-            return
-        self._stop.clear()
+        if self._alive():
+            raise RuntimeError("alert dispatcher threads still running; cannot (re)start yet")
+        stop = threading.Event()  # fresh per start: a stuck old worker keeps its own
+        self._stop = stop
+        self._channels = [_Channel(n, self._queue_max) for n in self._notifiers]
         self._sub = self._bus.subscribe(maxsize=self._queue_max)
         for ch in self._channels:
             ch.thread = threading.Thread(
-                target=self._run_channel, args=(ch,), name=f"alerts-{ch.name}", daemon=True
+                target=self._run_channel, args=(ch, stop), name=f"alerts-{ch.name}", daemon=True
             )
             ch.thread.start()
-        self._reader = threading.Thread(target=self._read_bus, name="alerts-reader", daemon=True)
+        self._reader = threading.Thread(
+            target=self._read_bus, args=(self._sub, stop), name="alerts-reader", daemon=True
+        )
         self._reader.start()
 
     def stop(self, timeout: float = 5.0) -> None:
@@ -112,25 +124,37 @@ class AlertDispatcher:
         if self._sub is not None:
             self._bus.unsubscribe(self._sub)
         end = time.monotonic() + timeout
-        threads = [self._reader] + [ch.thread for ch in self._channels]
-        for t in threads:
-            if t is not None:
-                t.join(max(0.0, end - time.monotonic()))
-        self._reader = None
-        self._sub = None
+        named = [("reader", self._reader)] + [(ch.name, ch.thread) for ch in self._channels]
+        for name, t in named:
+            if t is None:
+                continue
+            t.join(max(0.0, end - time.monotonic()))
+            if t.is_alive():
+                log.warning("alert worker for %s did not stop within timeout (stuck in I/O?)", name)
 
     def send_test(self) -> None:
         for ch in self._channels:
             ch.offer(_TEST)
 
     # -- internals ---------------------------------------------------------
-    def _interruptible_sleep(self, seconds: float) -> None:
-        self._stop.wait(seconds)
+    def _sleep(self, seconds: float, stop: threading.Event) -> None:
+        if self._custom_sleep is not None:
+            self._custom_sleep(seconds)
+        else:
+            stop.wait(seconds)
 
-    def _read_bus(self) -> None:
-        assert self._sub is not None
-        sub = self._sub
-        while not self._stop.is_set():
+    def _read_bus(self, sub: Subscription, stop: threading.Event) -> None:
+        last_seen = 0
+        unreported = 0
+        last_warn: float | None = None
+        while not stop.is_set():
+            dropped = sub.dropped
+            unreported += dropped - last_seen
+            last_seen = dropped
+            if unreported and (last_warn is None or self._clock() - last_warn >= _DROP_WARN_S):
+                log.warning("alert subscription full; %d events dropped", unreported)
+                unreported = 0
+                last_warn = self._clock()
             try:
                 msg = sub.get(timeout=_POLL_S)
             except queue.Empty:
@@ -140,48 +164,69 @@ class AlertDispatcher:
             t = msg.get("truck")
             if not isinstance(t, dict):
                 continue
+            stamp = self._clock()
             for ch in self._channels:
-                ch.offer(t)
+                ch.offer((stamp, t))
 
-    def _run_channel(self, ch: _Channel) -> None:
-        while not self._stop.is_set():
-            if ch.pending:
-                timeout = max(0.0, ch.deadline - self._clock())
-            else:
-                timeout = _POLL_S
+    def _run_channel(self, ch: _Channel, stop: threading.Event) -> None:
+        while not stop.is_set():
             try:
-                item = ch.inbox.get(timeout=min(timeout, _POLL_S) if timeout else 0)
+                self._step(ch, stop)
+            except Exception as exc:  # never let the worker die; type only, no data
+                log.error("alert worker error on channel %s: %s", ch.name, type(exc).__name__)
+                stop.wait(_POLL_S)
+
+    def _step(self, ch: _Channel, stop: threading.Event) -> None:
+        if ch.pending:
+            timeout = min(max(0.0, ch.deadline - self._clock()), _POLL_S)
+        else:
+            timeout = _POLL_S
+        try:
+            items = [ch.inbox.get(timeout=timeout) if timeout else ch.inbox.get_nowait()]
+        except queue.Empty:
+            items = []
+        while items:  # drain whatever piled up so it is grouped into one batch
+            try:
+                items.append(ch.inbox.get_nowait())
             except queue.Empty:
-                item = None
+                break
+        for item in items:
             if item is _TEST:
                 if self._enabled(ch.name):
-                    self._deliver(ch, AlertBatch((), is_test=True))
-            elif item is not None:
-                self._on_truck(ch, item)
-            if ch.pending and self._clock() >= ch.deadline:
-                self._flush(ch)
+                    self._deliver(ch, AlertBatch((), is_test=True), stop)
+            else:
+                self._on_truck(ch, item[0], item[1], stop)
+        if ch.pending and self._clock() >= ch.deadline:
+            self._flush(ch, stop)
 
-    def _on_truck(self, ch: _Channel, truck: dict) -> None:
+    def _on_truck(self, ch: _Channel, stamp: float, truck: dict, stop: threading.Event) -> None:
+        """Group by *arrival* time (stamp), so trucks that piled up behind a slow send
+        stay in one batch, while a truck arriving after an idle cooldown goes out alone."""
+        if not ch.pending and (
+            ch.last_sent is None or stamp - ch.last_sent >= self._cooldown
+        ):
+            ch.pending.append(truck)
+            self._flush(ch, stop)
+            return
         ch.pending.append(truck)
         if len(ch.pending) > ch.queue_max:
             del ch.pending[0]
             log.warning("alert queue full for channel %s; dropped oldest", ch.name)
         if len(ch.pending) == 1:
-            ch.deadline = (
-                ch.last_sent + self._cooldown if ch.last_sent is not None else self._clock()
-            )
+            assert ch.last_sent is not None
+            ch.deadline = ch.last_sent + self._cooldown
 
-    def _flush(self, ch: _Channel) -> None:
+    def _flush(self, ch: _Channel, stop: threading.Event) -> None:
         trucks, ch.pending = tuple(ch.pending), []
         if not self._enabled(ch.name):
             return
         ch.last_sent = self._clock()
-        self._deliver(ch, AlertBatch(trucks))
+        self._deliver(ch, AlertBatch(trucks), stop)
 
-    def _deliver(self, ch: _Channel, batch: AlertBatch) -> None:
+    def _deliver(self, ch: _Channel, batch: AlertBatch, stop: threading.Event) -> None:
         attempts = 1 + len(self._retries)
         for i in range(attempts):
-            if self._stop.is_set():
+            if stop.is_set():
                 return
             try:
                 ch.notifier.send(batch)
@@ -192,7 +237,7 @@ class AlertDispatcher:
                     ch.name, i + 1, attempts, type(exc).__name__,
                 )
             if i < len(self._retries):
-                self._sleep(self._retries[i])
+                self._sleep(self._retries[i], stop)
         log.error(
             "alert channel %s failed after %d attempts; dropping batch of %d",
             ch.name, attempts, len(batch.trucks),

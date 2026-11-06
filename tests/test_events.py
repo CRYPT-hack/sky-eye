@@ -459,3 +459,14 @@ def test_failed_later_track_still_announces_earlier_one(tmp_path, monkeypatch):
         assert len(rig.evidence._pending) == 1  # its clip started
     finally:
         rig.close()
+
+
+def test_bus_counts_dropped_per_subscriber():
+    bus = EventBus()
+    small = bus.subscribe(maxsize=2)
+    big = bus.subscribe(maxsize=100)
+    for i in range(5):
+        bus.publish({"i": i})
+    assert small.dropped == 3
+    assert big.dropped == 0
+    assert [small.get_nowait()["i"], small.get_nowait()["i"]] == [3, 4]
