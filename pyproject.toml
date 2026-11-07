@@ -17,12 +17,14 @@ dependencies = [
     "numpy>=2.0",
     "torch",
     "trackers~=2.7",
+    "httpx~=0.28",
+    "plyer~=2.1",
+    "paho-mqtt~=2.2",
 ]
 
 [dependency-groups]
 dev = [
     "pytest~=9.2",
-    "httpx~=0.28",
 ]
 
 [build-system]

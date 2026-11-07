@@ -35,6 +35,10 @@ class AlertBatch:
         return f"{len(self.trucks)} new trucks"
 
 
+class AlertError(Exception):
+    """A notifier failed to deliver; the text is safe to log (no secrets)."""
+
+
 class Notifier(Protocol):
     name: str
 
