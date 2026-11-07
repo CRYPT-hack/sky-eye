@@ -46,6 +46,91 @@ Exit code 2 with a short message means a startup problem (bad config value, port
 already in use, missing weights, no CUDA). Exit code 1 means the engine did not stop
 within 5 s and was ended forcibly.
 
+## Live drone input
+
+Set `source.type` in `config.yaml`. Every source is read the same way once it is open;
+the website's Status page shows the source state.
+
+- **HDMI capture card (works with any drone):** plug the controller's HDMI out into a
+  USB capture card and use `type: capture` with `device: 0` (try 1, 2, ... if you
+  have several cameras).
+- **DJI apps:** most DJI apps can push RTMP live to a server. Run
+  [go2rtc](https://github.com/AlexxIT/go2rtc) or MediaMTX on the laptop (both free),
+  point the DJI app's "RTMP custom" at `rtmp://<laptop-ip>:1935/live/drone`, then use:
+
+  ```yaml
+  source:
+    type: go2rtc
+    go2rtc:
+      name: drone
+      rtsp_base: rtsp://127.0.0.1:8554   # the default
+  ```
+
+  The exact menu names and what is supported depend on your app and drone; this
+  project does not promise anything for a specific model.
+- **RTSP cameras, PX4 companion computers, other streams:**
+
+  ```yaml
+  source:
+    type: stream
+    url: rtsp://192.168.1.20:8554/live
+  ```
+
+  Accepted schemes: `rtsp`, `rtsps`, `rtmp`, `rtmps`, `udp`, `http`, `https`.
+  `srt://` is rejected: relay it through go2rtc and use `type: go2rtc`.
+  Passwords in the URL are hidden in logs and on the website; a password containing
+  `#`, `/` or `?` must be percent-encoded (`%23`, `%2F`, `%3F`).
+
+**Reconnecting** means the stream stopped delivering frames (Wi-Fi drop, drone out of
+range, encoder restart). The engine keeps running and retries with a growing delay;
+the website shows a "Reconnecting" banner and detection resumes by itself when
+frames return.
+
+## Alerts
+
+When a new truck is confirmed, the engine can alert you on up to three channels. In
+`config.yaml`:
+
+```yaml
+alerts:
+  cooldown_s: 10      # trucks within this many seconds of the last alert become one batch
+  desktop: true       # Windows toast and beep on the laptop running the engine (default on)
+```
+
+**Telegram**
+
+1. Talk to @BotFather in Telegram and run `/newbot` to get a token.
+2. Send any message to your new bot.
+3. Open `https://api.telegram.org/bot<token>/getUpdates` in a browser (replace
+   `<token>` with your token) and find `chat` then `id` in the reply.
+4. Put both in `.env`: `TELEGRAM_BOT_TOKEN=...` and `TELEGRAM_CHAT_ID=...`.
+5. In `config.yaml` set `alerts.telegram.enabled: true`, and optionally
+   `alerts.telegram.dashboard_url` to the LAN URL printed at startup so the message links
+   to the website.
+
+**MQTT**
+
+```yaml
+alerts:
+  mqtt:
+    enabled: true
+    host: 127.0.0.1
+    port: 1883
+    topic: sky-eye/events
+    username: null     # set a user name to authenticate; the password is MQTT_PASSWORD in .env
+    tls: false
+```
+
+Delivery is at-least-once (QoS 1), so a subscriber can see the same event twice.
+
+Secrets (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `MQTT_PASSWORD`) belong in `.env`
+only, never in `config.yaml`.
+
+On the website's Status page, each configured channel has a switch that turns it on or
+off while the engine runs (not saved to `config.yaml`; it resets on restart), and
+**Send test alert** sends a test message to every channel that is switched on. A
+failing channel is retried a few times and never stops detection.
+
 ## Dashboard
 
 The website in `dashboard/` (React + TypeScript, built with Vite) shows the live
