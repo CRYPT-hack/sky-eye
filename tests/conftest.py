@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from engine.core import Frame
+from engine.telemetry import DronePose
 
 
 def make_video(path: Path, n_frames: int, fps: float = 30, size=(320, 240)) -> Path:
@@ -30,3 +31,35 @@ def fake_frame(index: int, ts: float) -> Frame:
         wall_time=datetime.now(timezone.utc),
         index=index,
     )
+
+
+class FakeTelemetry:
+    """A Telemetry that returns fixed poses and counts calls; never touches a network."""
+
+    def __init__(self, pose: DronePose | None = None, state: str = "ok", track=()):
+        self.pose = pose
+        self._state = state
+        self._track = list(track)
+        self.pose_calls = 0
+        self.started = 0
+        self.stopped = 0
+
+    def start(self) -> None:
+        self.started += 1
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+    def pose_for(self, frame):
+        self.pose_calls += 1
+        return self.pose
+
+    def latest(self):
+        return self.pose
+
+    def track(self, seconds):
+        return list(self._track)
+
+    @property
+    def state(self) -> str:
+        return self._state

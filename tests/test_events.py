@@ -12,7 +12,8 @@ from engine.events.bus import EventBus
 from engine.events.evidence import EvidenceRecorder
 from engine.events.manager import EventManager, truck_to_json
 from engine.storage import TruckRecord, TruckRepository
-from tests.conftest import fake_frame
+from engine.telemetry import DronePose
+from tests.conftest import FakeTelemetry, fake_frame
 
 BOX = (50.0, 50.0, 120.0, 100.0)
 
@@ -32,7 +33,7 @@ def drain(q: queue.Queue) -> list[dict]:
 
 
 class Rig:
-    def __init__(self, data_dir, window=2.0, max_bytes=10**9):
+    def __init__(self, data_dir, window=2.0, max_bytes=10**9, telemetry=None):
         self.data_dir = data_dir
         self.repo = TruckRepository(data_dir / "sky-eye.db")
         self.run_id = self.repo.create_run("test", "{}")
@@ -40,7 +41,8 @@ class Rig:
         self.bus = EventBus()
         self.q = self.bus.subscribe()
         self.mgr = EventManager(
-            self.repo, self.evidence, self.bus, self.run_id, data_dir, window, max_bytes
+            self.repo, self.evidence, self.bus, self.run_id, data_dir, window, max_bytes,
+            telemetry=telemetry,
         )
 
     def feed(self, index: int, ts: float, res: TrackerResult):
@@ -506,3 +508,140 @@ def test_bus_counts_dropped_per_subscriber():
     assert small.dropped == 3
     assert big.dropped == 0
     assert [small.get_nowait()["i"], small.get_nowait()["i"]] == [3, 4]
+
+
+# --- geolocation from telemetry ---
+POSE_DOWN = DronePose(0.0, 48.0, 11.0, 50.0, 0.0, -45.0)
+POSE_LEVEL = DronePose(0.0, 48.0, 11.0, 50.0, 0.0, 0.0)  # box is above the horizon
+
+
+def test_no_telemetry_keeps_unknown(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        rig.feed(0, 0.0, result(0.8))
+        rec = rig.repo.get_truck(1)
+        assert (rec.lat, rec.lon, rec.geo_error_m, rec.geo_status) == (None, None, None, "unknown")
+        (new,) = [m for m in drain(rig.q) if m["type"] == "truck.new"]
+        assert new["truck"]["geo_status"] == "unknown" and new["truck"]["lat"] is None
+    finally:
+        rig.close()
+
+
+def test_truck_gets_location_from_pose(tmp_path):
+    rig = Rig(tmp_path, telemetry=FakeTelemetry(POSE_DOWN))
+    try:
+        rig.feed(0, 0.0, result(0.8))
+        rec = rig.repo.get_truck(1)
+        assert rec.geo_status == "ok"
+        assert rec.lat is not None and 48.0 < rec.lat < 48.01  # yaw 0: north of the drone
+        assert rec.lon is not None and abs(rec.lon - 11.0) < 0.001
+        assert rec.geo_error_m is not None and rec.geo_error_m > 0
+        (new,) = [m for m in drain(rig.q) if m["type"] == "truck.new"]
+        assert new["truck"]["geo_status"] == "ok" and new["truck"]["lat"] == rec.lat
+    finally:
+        rig.close()
+
+
+def test_unreliable_location_stored(tmp_path):
+    rig = Rig(tmp_path, telemetry=FakeTelemetry(POSE_LEVEL))
+    try:
+        rig.feed(0, 0.0, result(0.8))
+        rec = rig.repo.get_truck(1)
+        assert (rec.lat, rec.lon, rec.geo_status) == (None, None, "unreliable")
+    finally:
+        rig.close()
+
+
+def test_pose_for_called_on_every_frame(tmp_path):
+    tel = FakeTelemetry(POSE_DOWN)
+    rig = Rig(tmp_path, telemetry=tel)
+    try:
+        rig.feed(0, 0.0, result(None))  # no trucks at all
+        rig.feed(1, 0.1, result(0.8))
+        rig.feed(2, 0.2, result(0.8))
+        assert tel.pose_calls == 3
+    finally:
+        rig.close()
+
+
+def test_better_snapshot_does_not_downgrade_ok_location(tmp_path):
+    tel = FakeTelemetry(POSE_DOWN)
+    rig = Rig(tmp_path, telemetry=tel)
+    try:
+        rig.feed(0, 0.0, result(0.6))
+        first = rig.repo.get_truck(1)
+        assert first.geo_status == "ok"
+        tel.pose = None  # lost telemetry, but a better snapshot arrives
+        rig.feed(1, 0.5, result(0.9))
+        rec = rig.repo.get_truck(1)
+        assert rec.best_score == 0.9
+        assert (rec.lat, rec.lon, rec.geo_error_m, rec.geo_status) == (
+            first.lat, first.lon, first.geo_error_m, "ok")
+    finally:
+        rig.close()
+
+
+def test_better_snapshot_upgrades_unknown_location(tmp_path):
+    tel = FakeTelemetry(None)
+    rig = Rig(tmp_path, telemetry=tel)
+    try:
+        rig.feed(0, 0.0, result(0.6))
+        assert rig.repo.get_truck(1).geo_status == "unknown"
+        tel.pose = POSE_DOWN
+        rig.feed(1, 0.5, result(0.9))
+        assert rig.repo.get_truck(1).geo_status == "ok"
+    finally:
+        rig.close()
+
+
+def test_telemetry_failure_never_breaks_detection(tmp_path, caplog):
+    class Boom(FakeTelemetry):
+        def pose_for(self, frame):
+            raise RuntimeError("secret-connection-string")
+
+    rig = Rig(tmp_path, telemetry=Boom())
+    try:
+        with caplog.at_level(logging.WARNING):
+            rig.feed(0, 0.0, result(0.8))
+        assert rig.repo.get_truck(1).geo_status == "unknown"
+        assert "secret-connection-string" not in caplog.text
+        assert "RuntimeError" in caplog.text
+    finally:
+        rig.close()
+
+
+def test_telemetry_failure_logs_are_rate_limited(tmp_path, caplog, monkeypatch):
+    import engine.events.manager as mgr_mod
+
+    class Boom(FakeTelemetry):
+        def pose_for(self, frame):
+            raise RuntimeError("secret-connection-string")
+
+    clock = [100.0]
+    monkeypatch.setattr(mgr_mod.time, "monotonic", lambda: clock[0])
+    rig = Rig(tmp_path, telemetry=Boom())
+    try:
+        with caplog.at_level(logging.WARNING, logger="engine.events.manager"):
+            for i in range(50):
+                rig.feed(i, i / 10, result(None))
+            assert len(caplog.records) == 1  # the first failure only
+            clock[0] += 11.0
+            rig.feed(50, 5.0, result(None))
+        assert len(caplog.records) == 2
+        assert "50 more" in caplog.records[1].getMessage()
+        assert "secret-connection-string" not in caplog.text
+    finally:
+        rig.close()
+
+
+def test_better_snapshot_is_one_database_write(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, telemetry=FakeTelemetry(POSE_DOWN))
+    try:
+        rig.feed(0, 0.0, result(0.6))
+        calls = []
+        real = rig.repo.update_truck
+        monkeypatch.setattr(rig.repo, "update_truck", lambda *a, **k: (calls.append(k), real(*a, **k)))
+        rig.feed(1, 0.5, result(0.9))
+        assert len(calls) == 1 and calls[0]["best_score"] == 0.9 and "lat" in calls[0]
+    finally:
+        rig.close()

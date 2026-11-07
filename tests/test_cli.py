@@ -18,7 +18,7 @@ from engine.app import build_engine, load_dotenv, main
 from engine.config import load_config
 from engine.detectors.fake import FakeDetector
 from engine.events.bus import EventBus
-from tests.conftest import make_video
+from tests.conftest import FakeTelemetry, make_video
 
 
 def write_config(tmp_path, extra_detector: str = "", source: str = "", extra: str = "") -> object:
@@ -716,13 +716,16 @@ def test_info_never_contains_secrets(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "TelegramNotifier", lambda *a, **k: _FakeNotifier("telegram"))
     monkeypatch.setattr(app_mod, "MqttNotifier", lambda *a, **k: _FakeNotifier("mqtt"))
     video = make_video(tmp_path / "v.mp4", 5)
+    monkeypatch.setattr(app_mod, "build_telemetry", lambda cfg: FakeTelemetry())
     extra = ("alerts:\n  telegram:\n    enabled: true\n"
-             "  mqtt:\n    enabled: true\n    username: bob\n")
+             "  mqtt:\n    enabled: true\n    username: bob\n"
+             "telemetry:\n  type: mavlink\n  connection: udpin:0.0.0.0:14551\n")
     cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}", extra=extra))
     ctx = build_engine(cfg)
     try:
         with TestClient(create_app(ctx)) as client:
-            bodies = [client.get("/api/info").text, client.get("/api/config/runtime").text]
+            bodies = [client.get(p).text for p in (
+                "/api/info", "/api/config/runtime", "/api/status", "/api/telemetry")]
         db = sqlite3.connect(cfg.evidence.data_dir / "sky-eye.db")
         try:
             rows = db.execute("SELECT config_json FROM runs").fetchall()
@@ -733,5 +736,143 @@ def test_info_never_contains_secrets(tmp_path, monkeypatch):
         for body in bodies:
             for value in secrets.values():
                 assert value not in body
+            assert "0.0.0.0:14551" not in body  # the telemetry link stays out of the DB too
     finally:
         app_mod.shutdown_engine(ctx)
+
+
+def test_srt_path_not_exposed_or_stored(tmp_path, monkeypatch):
+    import sqlite3
+
+    from fastapi.testclient import TestClient
+
+    from engine.api.app import create_app
+
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    monkeypatch.setattr(app_mod, "build_telemetry", lambda cfg: FakeTelemetry())
+    folder = tmp_path / "private-folder"
+    folder.mkdir()
+    video = make_video(tmp_path / "v.mp4", 5)
+    srt = folder / "flight.SRT"
+    srt.write_text("x", encoding="utf-8")
+    extra = f"telemetry:\n  type: dji_srt\n  srt_path: {srt.as_posix()}\n"
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}", extra=extra))
+    ctx = build_engine(cfg)
+    try:
+        with TestClient(create_app(ctx)) as client:
+            bodies = [client.get(p).text for p in (
+                "/api/info", "/api/status", "/api/telemetry", "/api/config/runtime")]
+        db = sqlite3.connect(cfg.evidence.data_dir / "sky-eye.db")
+        try:
+            stored = [r[0] for r in db.execute("SELECT config_json FROM runs")]
+        finally:
+            db.close()
+        assert "dji_srt" in bodies[0]
+        for body in bodies + stored:
+            assert "private-folder" not in body
+        assert stored and "flight.SRT" not in "".join(bodies)
+    finally:
+        app_mod.shutdown_engine(ctx)
+
+
+def test_build_engine_shares_one_telemetry(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    tel = FakeTelemetry()
+    monkeypatch.setattr(app_mod, "build_telemetry", lambda cfg: tel)
+    video = make_video(tmp_path / "v.mp4", 5)
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}"))
+    ctx = build_engine(cfg)
+    try:
+        assert ctx.telemetry is tel
+        assert ctx.pipeline._telemetry is tel
+        assert ctx.pipeline._events._telemetry is tel
+    finally:
+        app_mod.shutdown_engine(ctx)
+
+
+def test_build_telemetry_does_not_import_pymavlink(tmp_path):
+    import subprocess
+    import sys
+
+    video = make_video(tmp_path / "v.mp4", 5)
+    srt = tmp_path / "v.srt"
+    srt.write_text("x", encoding="utf-8")
+    code = (
+        "import sys\n"
+        "from engine.config import load_config\n"
+        "from engine.telemetry import build_telemetry\n"
+        "for t in ('none', 'dji_srt'):\n"
+        "    cfg = load_config(sys.argv[1])\n"
+        "    cfg.telemetry.type = t\n"
+        "    build_telemetry(cfg)\n"
+        "bad = [m for m in sys.modules if m.startswith('pymavlink')]\n"
+        "assert not bad, bad\n"
+    )
+    cfg_path = write_config(tmp_path, source=f"  path: {video.as_posix()}")
+    cfg_path.write_text(
+        cfg_path.read_text(encoding="utf-8") + f"telemetry:\n  srt_path: {srt.as_posix()}\n",
+        encoding="utf-8",
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code, str(cfg_path)],
+        cwd=Path(app_mod.__file__).parents[1], capture_output=True, text=True, timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+
+
+def test_info_has_no_connection_string(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from engine.api.app import create_app
+
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    monkeypatch.setattr(app_mod, "build_telemetry", lambda cfg: FakeTelemetry())
+    video = make_video(tmp_path / "v.mp4", 5)
+    extra = "telemetry:\n  type: mavlink\n  connection: udpin:0.0.0.0:14551\n"
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}", extra=extra))
+    ctx = build_engine(cfg)
+    try:
+        assert ctx.info["telemetry"] == "mavlink"
+        assert ctx.info["map_tile_url"] == cfg.api.map_tile_url
+        with TestClient(create_app(ctx)) as client:
+            bodies = [client.get(p).text for p in (
+                "/api/info", "/api/status", "/api/telemetry", "/api/config/runtime")]
+        assert "telemetry" in bodies[0] and "mavlink" in bodies[0]
+        for body in bodies:
+            assert "14551" not in body and "udpin" not in body
+    finally:
+        app_mod.shutdown_engine(ctx)
+
+
+def test_build_telemetry_selects_source(tmp_path, monkeypatch):
+    from engine.telemetry import NoTelemetry, build_telemetry
+    import engine.telemetry.dji_srt as dji_mod
+    import engine.telemetry.mavlink as mav_mod
+
+    calls: dict = {}
+
+    class FakeSrt(FakeTelemetry):
+        def __init__(self, path, max_age_s, loop=False):
+            super().__init__()
+            calls["srt"] = (path, max_age_s, loop)
+
+    class FakeMav(FakeTelemetry):
+        def __init__(self, connection, max_age_s, stale_after_s, **kw):
+            super().__init__()
+            calls["mav"] = (connection, max_age_s, stale_after_s)
+
+    monkeypatch.setattr(dji_mod, "DjiSrtTelemetry", FakeSrt)
+    monkeypatch.setattr(mav_mod, "MavlinkTelemetry", FakeMav)
+    video = make_video(tmp_path / "v.mp4", 5)
+    srt = tmp_path / "v.srt"
+    srt.write_text("x", encoding="utf-8")
+
+    def cfg_for(extra: str):
+        return load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}\n  loop: true", extra=extra))
+
+    assert isinstance(build_telemetry(cfg_for("")), NoTelemetry)
+    build_telemetry(cfg_for("telemetry:\n  type: dji_srt\n  max_age_s: 0.7\n"))
+    assert calls["srt"] == (srt, 0.7, True)
+    build_telemetry(cfg_for(
+        "telemetry:\n  type: mavlink\n  connection: udpin:0.0.0.0:14551\n  stale_after_s: 3\n"))
+    assert calls["mav"] == ("udpin:0.0.0.0:14551", 0.5, 3.0)

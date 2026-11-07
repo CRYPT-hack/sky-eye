@@ -535,3 +535,21 @@ def test_real_paho_client_constructs():
     c = pm.Client(callback_api_version=pm.CallbackAPIVersion.VERSION2)
     c.max_queued_messages_set(100)
     assert c.is_connected() is False
+
+
+def test_telegram_caption_has_map_link(tmp_path):
+    seen, handler = recorder()
+    tg = make_tg(tmp_path, handler)
+    ok = {**truck(), "lat": 48.1234567, "lon": 11.5, "geo_status": "ok"}
+    tg.send(AlertBatch((ok,)))
+    (req,) = seen
+    text = json.loads(req.content)["text"]
+    assert ("https://www.openstreetmap.org/?mlat=48.123457&mlon=11.500000"
+            "#map=17/48.123457/11.500000") in text
+    for status in ("unreliable", "unknown"):
+        seen.clear()
+        tg.send(AlertBatch(({**truck(), "lat": 1.0, "lon": 2.0, "geo_status": status},)))
+        assert "openstreetmap" not in json.loads(seen[0].content)["text"]
+    seen.clear()
+    tg.send(AlertBatch(({**truck(), "lat": None, "lon": None, "geo_status": "ok"},)))
+    assert "openstreetmap" not in json.loads(seen[0].content)["text"]

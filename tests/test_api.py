@@ -23,6 +23,8 @@ from engine.config import ApiConfig, AuthConfig
 from engine.events.bus import EventBus
 from engine.pipeline import PipelineStatus, RuntimeSettings
 from engine.storage import TruckRecord, TruckRepository, media_dir
+from engine.telemetry import DronePose
+from tests.conftest import FakeTelemetry
 
 JPEG = b"\xff\xd8\xff\xe0fakejpeg\xff\xd9"
 T0 = datetime(2026, 11, 5, 12, 0, 0, tzinfo=timezone.utc)
@@ -59,6 +61,8 @@ def make_rig(
     mode: str = "none",
     token: str | None = None,
     dashboard_dir: Path | None = None,
+    telemetry=None,
+    telemetry_type: str = "none",
 ) -> Rig:
     data_dir.mkdir(parents=True, exist_ok=True)
     repo = TruckRepository(data_dir / "sky-eye.db")
@@ -73,6 +77,7 @@ def make_rig(
         token=token,
         info={**INFO, "auth": mode},
         dashboard_dir=dashboard_dir,
+        **({"telemetry": telemetry, "telemetry_type": telemetry_type} if telemetry else {}),
     )
     return Rig(ctx, repo, bus)
 
@@ -606,3 +611,131 @@ def test_alert_test_requires_token(tmp_path, monkeypatch):
             assert ok.status_code == 200
     finally:
         r.repo.close()
+
+
+# --- telemetry ---
+def _poses(n: int) -> list[DronePose]:
+    return [DronePose(1.7e9 + i, 48.0 + i * 1e-5, 11.0, 50.0, 90.0, -60.0) for i in range(n)]
+
+
+def _tel_client(tmp_path, telemetry, telemetry_type="mavlink"):
+    rig = make_rig(tmp_path / "data", telemetry=telemetry, telemetry_type=telemetry_type)
+    return rig, TestClient(create_app(rig.ctx))
+
+
+def test_telemetry_endpoint_and_ws(tmp_path):
+    poses = _poses(3)
+    tel = FakeTelemetry(poses[-1], track=poses)
+    rig, client = _tel_client(tmp_path, tel)
+    try:
+        with client:
+            body = client.get("/api/telemetry?seconds=60").json()
+            assert body["api"] == 1 and body["state"] == "ok"
+            assert body["latest"] == {
+                "lat": poses[-1].lat, "lon": 11.0, "alt_agl_m": 50.0, "yaw_deg": 90.0,
+                "t_iso": datetime.fromtimestamp(poses[-1].ts, tz=timezone.utc)
+                .isoformat().replace("+00:00", "Z"),
+            }
+            assert body["track"] == [[p.lat, p.lon] for p in poses]
+            with client.websocket_connect("/ws") as ws:
+                seen = []
+                for _ in range(10):
+                    msg = ws.receive_json()
+                    seen.append(msg["type"])
+                    if msg["type"] == "telemetry":
+                        assert msg["api"] == 1 and msg["latest"]["lat"] == poses[-1].lat
+                        break
+                assert "telemetry" in seen
+    finally:
+        rig.repo.close()
+
+
+def test_telemetry_endpoint_without_telemetry(client):
+    body = client.get("/api/telemetry").json()
+    assert body == {"api": 1, "state": "none", "latest": None, "track": []}
+
+
+def test_telemetry_ws_silent_without_telemetry(client):
+    with client.websocket_connect("/ws") as ws:
+        types = [ws.receive_json()["type"] for _ in range(2)]  # two status ticks, 1 s apart
+    assert types == ["status", "status"]
+
+
+def test_telemetry_ws_gated_by_type_none(tmp_path):
+    # a pose exists but telemetry is switched off: no telemetry message is ever sent
+    tel = FakeTelemetry(_poses(1)[0])
+    rig, client = _tel_client(tmp_path, tel, "none")
+    try:
+        with client, client.websocket_connect("/ws") as ws:
+            types = [ws.receive_json()["type"] for _ in range(2)]
+        assert types == ["status", "status"]
+    finally:
+        rig.repo.close()
+
+
+def test_telemetry_ws_unchanged_pose_sent_once(tmp_path):
+    tel = FakeTelemetry(_poses(1)[0])
+    rig, client = _tel_client(tmp_path, tel)
+    try:
+        with client, client.websocket_connect("/ws") as ws:
+            types = [ws.receive_json()["type"] for _ in range(4)]  # >= 2 status ticks
+        assert types.count("telemetry") == 1 and types.count("status") >= 2
+    finally:
+        rig.repo.close()
+
+
+def test_telemetry_t_iso_null_for_srt(tmp_path):
+    tel = FakeTelemetry(_poses(1)[0], track=_poses(1))
+    rig, client = _tel_client(tmp_path, tel, "dji_srt")
+    try:
+        with client:
+            assert client.get("/api/telemetry").json()["latest"]["t_iso"] is None
+    finally:
+        rig.repo.close()
+
+
+@pytest.mark.parametrize("seconds", [0, 4000, -1])
+def test_telemetry_seconds_bounds(client, seconds):
+    r = client.get(f"/api/telemetry?seconds={seconds}")
+    assert r.status_code == 422 and r.json()["api"] == 1
+
+
+def test_telemetry_track_thinned(tmp_path):
+    poses = _poses(2500)
+    tel = FakeTelemetry(poses[-1], track=poses)
+    rig, client = _tel_client(tmp_path, tel)
+    try:
+        with client:
+            track = client.get("/api/telemetry?seconds=3600").json()["track"]
+        assert len(track) <= 600
+        assert track[-1] == [poses[-1].lat, poses[-1].lon]
+        assert track[0] == [poses[0].lat, poses[0].lon]
+        assert track == sorted(track)  # still in time order
+    finally:
+        rig.repo.close()
+
+
+def test_status_has_telemetry_state(tmp_path):
+    rig = make_rig(tmp_path / "data")
+    try:
+        class P(FakePipeline):
+            def status(self):
+                return PipelineStatus("running", 1.0, 1, 0, 0, T0, telemetry_state="stale")
+
+        rig.ctx.pipeline = P()  # type: ignore[assignment]
+        with TestClient(create_app(rig.ctx)) as c:
+            assert c.get("/api/status").json()["status"]["telemetry_state"] == "stale"
+    finally:
+        rig.repo.close()
+
+
+def test_telemetry_requires_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKYEYE_API_TOKEN", "tok")
+    rig = make_rig(tmp_path / "data", mode="token", token="tok")
+    try:
+        with TestClient(create_app(rig.ctx)) as c:
+            assert c.get("/api/telemetry").status_code == 401
+            ok = c.get("/api/telemetry", headers={"X-SkyEye-Token": "tok"})
+            assert ok.status_code == 200
+    finally:
+        rig.repo.close()

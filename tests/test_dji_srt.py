@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -78,10 +80,42 @@ def test_garbage_lines_skipped():
     assert parse_srt("") == []
 
 
+def _wait_loaded(t, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while t.state == "waiting" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert t.state != "waiting"
+
+
+def test_start_returns_before_parsing_finishes(tmp_path, monkeypatch):
+    import engine.telemetry.dji_srt as mod
+
+    release = threading.Event()
+    real = mod._parse
+
+    def slow(text):
+        release.wait(5)
+        return real(text)
+
+    monkeypatch.setattr(mod, "_parse", slow)
+    t = DjiSrtTelemetry(_write(tmp_path, NEW), max_age_s=0.5)
+    try:
+        t.start()  # must not block on the parser
+        assert t.state == "waiting"
+        assert t.pose_for(_frame(0.2)) is None and t.latest() is None and t.track(5.0) == []
+        release.set()
+        _wait_loaded(t)
+        assert t.state == "ok"
+    finally:
+        release.set()
+        t.stop()
+
+
 def test_pose_for_uses_video_time(tmp_path):
     t = DjiSrtTelemetry(_write(tmp_path, NEW), max_age_s=0.5)
     assert t.state == "waiting"
     t.start()
+    _wait_loaded(t)
     assert t.state == "ok"
     assert t.latest() is None
     assert t.pose_for(_frame(0.2)).lat == 22.5
@@ -96,9 +130,11 @@ def test_pose_for_wraps_when_looping(tmp_path):
     path = _write(tmp_path, NEW)
     looping = DjiSrtTelemetry(path, max_age_s=0.5, loop=True)
     looping.start()
+    _wait_loaded(looping)
     assert looping.pose_for(_frame(4.1)).ts == 0.0  # period 2.0 -> 0.1
     flat = DjiSrtTelemetry(path, max_age_s=0.5)
     flat.start()
+    _wait_loaded(flat)
     assert flat.pose_for(_frame(4.1)) is None
 
 
@@ -106,6 +142,7 @@ def test_missing_file_is_stale(tmp_path, caplog):
     t = DjiSrtTelemetry(tmp_path / "nope.SRT", max_age_s=0.5)
     with caplog.at_level(logging.WARNING):
         t.start()
+        _wait_loaded(t)
     assert t.state == "stale"
     assert t.pose_for(_frame(0.0)) is None
     assert t.latest() is None

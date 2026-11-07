@@ -23,7 +23,7 @@ from engine.pipeline import Pipeline, RuntimeSettings
 from engine.sources.file import FileSource
 from engine.storage import TruckRepository
 from engine.tracking import build_tracker
-from tests.conftest import fake_frame, make_video
+from tests.conftest import FakeTelemetry, fake_frame, make_video
 
 BOX_A = (20.0, 20.0, 80.0, 80.0)
 BOX_B = (200.0, 140.0, 300.0, 220.0)
@@ -125,6 +125,7 @@ class Rig:
         stream_max_width: int = 1280,
         before_s: float = 0.3,
         after_s: float = 4.5,
+        telemetry=None,
     ):
         self.data_dir = tmp_path / "data"
         self.repo = TruckRepository(self.data_dir / "sky-eye.db")
@@ -151,6 +152,7 @@ class Rig:
             self.runtime,
             realtime=realtime,
             stream_max_width=stream_max_width,
+            telemetry=telemetry,
         )
 
     def close(self):
@@ -602,3 +604,59 @@ def test_pipeline_reports_reconnecting(tmp_path):
         assert rig.pipeline.status().source_state == "ended"  # never overwritten
     finally:
         rig.close()
+
+
+def test_pipeline_starts_and_stops_telemetry(tmp_path):
+    video = make_video(tmp_path / "v.mp4", 10)
+    tel = FakeTelemetry(state="waiting")
+    rig = Rig(tmp_path, video, FakeDetector(lambda i: []), telemetry=tel)
+    try:
+        assert rig.pipeline.status().telemetry_state == "waiting"
+        rig.pipeline.start()
+        assert tel.started == 1
+        assert rig.pipeline.wait(30) is True
+        assert tel.stopped == 0  # runs until the engine stops, even after the file ends
+        rig.pipeline.stop()
+        assert tel.stopped == 1
+        rig.pipeline.stop()
+        assert tel.stopped == 1
+    finally:
+        rig.close()
+
+
+def test_telemetry_start_failure_does_not_stop_detection(tmp_path, caplog):
+    class Boom(FakeTelemetry):
+        def start(self):
+            raise OSError("udpin:0.0.0.0:14551")
+
+    video = make_video(tmp_path / "v.mp4", 10)
+    rig = Rig(tmp_path, video, FakeDetector(lambda i: []), telemetry=Boom())
+    try:
+        with caplog.at_level(logging.WARNING):
+            rig.pipeline.start()
+        assert rig.pipeline.wait(30) is True
+        assert rig.pipeline.status().frames_processed == 10
+        assert any("telemetry did not start: OSError" in r.getMessage() for r in caplog.records)
+        assert "14551" not in caplog.text
+    finally:
+        rig.close()
+
+
+def test_slow_telemetry_stop_is_bounded(tmp_path, caplog, monkeypatch):
+    import engine.pipeline as pipe_mod
+
+    class Slow(FakeTelemetry):
+        def stop(self):
+            time.sleep(3)
+
+    monkeypatch.setattr(pipe_mod, "_TELEMETRY_STOP_S", 0.3)
+    video = make_video(tmp_path / "v.mp4", 10)
+    rig = Rig(tmp_path, video, FakeDetector(lambda i: []), telemetry=Slow())
+    rig.pipeline.start()
+    assert rig.pipeline.wait(30) is True
+    with caplog.at_level(logging.WARNING):
+        t0 = time.monotonic()
+        rig.pipeline.stop()
+        assert time.monotonic() - t0 < 2.0
+    assert any("telemetry did not stop within" in r.getMessage() for r in caplog.records)
+    rig.close()
