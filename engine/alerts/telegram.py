@@ -77,6 +77,12 @@ class TelegramNotifier:
             f"\U0001F69A New truck #{t.get('id')}",
             f"Seen at {local_hms(t.get('last_seen'))}, score {score_pct(t)}",
         ]
+        lat, lon = t.get("lat"), t.get("lon")
+        if t.get("geo_status") == "ok" and lat is not None and lon is not None:
+            lines.append(
+                f"https://www.openstreetmap.org/?mlat={lat:.6f}&mlon={lon:.6f}"
+                f"#map=17/{lat:.6f}/{lon:.6f}"
+            )
         if self._dashboard:
             lines.append(f"{self._dashboard}/#/trucks/{t.get('id')}")
         return "\n".join(lines)

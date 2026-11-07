@@ -31,6 +31,7 @@ from engine.pipeline import Pipeline, RuntimeSettings
 from engine.sources import build_source
 from engine.sources.stream import redact_url
 from engine.storage import TruckRepository, media_dir, remove_partial_clips
+from engine.telemetry import build_telemetry
 from engine.tracking import build_tracker
 
 log = logging.getLogger(__name__)
@@ -147,6 +148,8 @@ def _engine_info(cfg: AppConfig, source_fps: float) -> dict[str, Any]:
         },
         "auth": cfg.api.auth.mode,
         "alerts": cfg.alerts.channels(),
+        "telemetry": cfg.telemetry.type,
+        "map_tile_url": cfg.api.map_tile_url,
     }
 
 
@@ -228,6 +231,7 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             log.info("%d clip(s) left pending by an earlier run marked as failed", stale)
         run_id = repo.create_run(label, _config_json(cfg))
         bus = EventBus()
+        telemetry = build_telemetry(cfg)  # not started: the pipeline starts it
         manager = EventManager(
             repo,
             recorder,
@@ -236,6 +240,8 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             data_dir,
             cfg.evidence.snapshot_window_s,
             int(cfg.evidence.max_disk_gb * 1024**3),
+            telemetry,
+            cfg.camera.hfov_deg,
         )
         runtime = RuntimeSettings(
             confidence=cfg.detector.confidence,
@@ -250,6 +256,7 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             runtime,
             realtime=cfg.source.realtime,
             stream_max_width=cfg.api.stream_max_width,
+            telemetry=telemetry,
         )
         notifiers = _build_notifiers(cfg, data_dir)
         dispatcher = AlertDispatcher(
@@ -277,6 +284,8 @@ def build_engine(cfg: AppConfig) -> EngineContext:
         dashboard_dir=cfg.api.dashboard_dir or _default_dashboard_dir(),
         alerts=dispatcher if notifiers else None,
         notifiers=notifiers,
+        telemetry=telemetry,
+        telemetry_type=cfg.telemetry.type,
     )
 
 

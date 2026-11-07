@@ -11,6 +11,7 @@ from urllib.parse import quote
 from engine.core import Frame, TrackerResult
 from engine.events.bus import EventBus
 from engine.events.evidence import EvidenceRecorder, save_snapshot
+from engine.geo import GeoFix, geolocate
 from engine.storage import (
     TruckRecord,
     TruckRepository,
@@ -18,6 +19,7 @@ from engine.storage import (
     enforce_retention,
     media_dir,
 )
+from engine.telemetry import DronePose, NoTelemetry, Telemetry
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +70,7 @@ class _Active:
     full_path: Path
     crop_path: Path
     heartbeat_ts: float  # frame.ts of the last last_seen write
+    geo_status: str = "unknown"
 
 
 class EventManager:
@@ -82,7 +85,11 @@ class EventManager:
         data_dir: Path,
         snapshot_window_s: float,
         max_disk_bytes: int,
+        telemetry: Telemetry | None = None,
+        hfov_deg: float = 82.0,
     ) -> None:
+        self._telemetry: Telemetry = telemetry if telemetry is not None else NoTelemetry()
+        self._hfov_deg = hfov_deg
         self._repo = repo
         self._evidence = evidence
         self._bus = bus
@@ -113,7 +120,24 @@ class EventManager:
         if rec is not None:
             self._bus.publish({"api": 1, "type": kind, "truck": truck_to_json(rec)})
 
+    def _pose_for(self, frame: Frame) -> DronePose | None:
+        # every frame, even without trucks: a recorded flight's "latest" follows playback
+        try:
+            return self._telemetry.pose_for(frame)
+        except Exception as exc:  # noqa: BLE001 - telemetry must never break detection
+            log.warning("telemetry pose lookup failed: %s", type(exc).__name__)
+            return None
+
+    def _geo(self, frame: Frame, box, pose: DronePose | None) -> GeoFix:
+        try:
+            h, w = frame.image.shape[:2]
+            return geolocate(box, (w, h), pose, self._hfov_deg)
+        except Exception as exc:  # noqa: BLE001 - telemetry must never break detection
+            log.warning("geolocation failed: %s", type(exc).__name__)
+            return GeoFix(None, None, None, "unknown")
+
     def on_frame(self, frame: Frame, result: TrackerResult) -> None:
+        pose = self._pose_for(frame)
         improved: list[int] = []  # trucks to publish truck.updated for (snapshot / heartbeat)
         created: list[Callable[[], None]] = []  # truck.new publish + clip start, after the lock
         ended: list[_Active] = []
@@ -123,7 +147,7 @@ class EventManager:
                     state = self._active.get(track.track_id)
                     score = track.detection.score
                     if state is None:
-                        created.append(self._create(frame, track.track_id, track.detection))
+                        created.append(self._create(frame, track.track_id, track.detection, pose))
                         continue
                     state.last_seen = frame.wall_time
                     if frame.ts - state.heartbeat_ts >= _HEARTBEAT_S:
@@ -144,6 +168,17 @@ class EventManager:
                             continue
                         state.best_score = score
                         self._repo.update_truck(state.truck_id, best_score=score)
+                        fix = self._geo(frame, track.detection.box, pose)
+                        # never replace a good location by a worse one
+                        if fix.status == "ok" or state.geo_status != "ok":
+                            state.geo_status = fix.status
+                            self._repo.update_truck(
+                                state.truck_id,
+                                lat=fix.lat,
+                                lon=fix.lon,
+                                geo_error_m=fix.error_m,
+                                geo_status=fix.status,
+                            )
                         if state.truck_id not in improved:
                             improved.append(state.truck_id)
                 ended = [self._active.pop(t) for t in result.ended_ids if t in self._active]
@@ -165,7 +200,9 @@ class EventManager:
         for state in ended:
             self._publish("truck.updated", state.truck_id)
 
-    def _create(self, frame: Frame, track_id: int, det) -> Callable[[], None]:
+    def _create(
+        self, frame: Frame, track_id: int, det, pose: DronePose | None
+    ) -> Callable[[], None]:
         # called with self._lock held; returns the step to run once it is released:
         # publish truck.new, then start the clip (so truck.new always comes first)
         folder = day_dir(self._data_dir, frame.wall_time)
@@ -173,6 +210,7 @@ class EventManager:
         full_path = folder / f"{stem}_full.jpg"
         crop_path = folder / f"{stem}_crop.jpg"
         save_snapshot(frame, det.box, full_path, crop_path)
+        fix = self._geo(frame, det.box, pose)
         rec = TruckRecord(
             id=None,
             run_id=self._run_id,
@@ -182,10 +220,15 @@ class EventManager:
             best_score=det.score,
             snapshot_path=self._rel(full_path),
             crop_path=self._rel(crop_path),
+            lat=fix.lat,
+            lon=fix.lon,
+            geo_error_m=fix.error_m,
+            geo_status=fix.status,
         )
         truck_id = self._repo.insert_truck(rec)
         self._active[track_id] = _Active(
-            truck_id, frame.ts, det.score, frame.wall_time, full_path, crop_path, frame.ts
+            truck_id, frame.ts, det.score, frame.wall_time, full_path, crop_path, frame.ts,
+            fix.status,
         )
         self._total += 1
         log.info("truck %d created (track %d, score %.2f)", truck_id, track_id, det.score)

@@ -16,6 +16,7 @@ from engine.annotate import annotate
 from engine.core import Detector, Frame, Track, Tracker, VideoSource
 from engine.events.evidence import EvidenceRecorder
 from engine.events.manager import EventManager
+from engine.telemetry import NoTelemetry, Telemetry
 
 log = logging.getLogger(__name__)
 
@@ -129,7 +130,10 @@ class Pipeline:
         runtime: RuntimeSettings,
         realtime: bool,
         stream_max_width: int = 1280,
+        telemetry: Telemetry | None = None,
     ) -> None:
+        self._telemetry: Telemetry = telemetry if telemetry is not None else NoTelemetry()
+        self._telemetry_started = False
         self._source = source
         self._detector = detector
         self._tracker = tracker
@@ -167,6 +171,11 @@ class Pipeline:
             self._started = True
             with self._lock:
                 self._started_at = datetime.now(timezone.utc)
+            try:
+                self._telemetry.start()
+                self._telemetry_started = True
+            except Exception as exc:  # noqa: BLE001 - detection runs without telemetry
+                log.warning("telemetry did not start: %s", type(exc).__name__)
             self._capture_thread = threading.Thread(
                 target=self._capture_loop, name="sky-eye-capture", daemon=True
             )
@@ -195,6 +204,12 @@ class Pipeline:
         for thread in (self._capture_thread, self._infer_thread):
             if thread is not None and thread is not threading.current_thread():
                 thread.join()
+        if self._telemetry_started:
+            self._telemetry_started = False
+            try:
+                self._telemetry.stop()
+            except Exception as exc:  # noqa: BLE001 - never block the shutdown
+                log.warning("telemetry did not stop cleanly: %s", type(exc).__name__)
 
     def wait(self, timeout: float | None = None) -> bool:
         """True once the pipeline has finished (events closed, clips written).
@@ -218,6 +233,7 @@ class Pipeline:
             trucks_now=self._events.active_count,
             trucks_total=self._events.total_count,
             started_at=started_at,
+            telemetry_state=self._telemetry.state,
         )
 
     def latest_jpeg(self) -> bytes | None:

@@ -23,7 +23,7 @@ from engine.pipeline import Pipeline, RuntimeSettings
 from engine.sources.file import FileSource
 from engine.storage import TruckRepository
 from engine.tracking import build_tracker
-from tests.conftest import fake_frame, make_video
+from tests.conftest import FakeTelemetry, fake_frame, make_video
 
 BOX_A = (20.0, 20.0, 80.0, 80.0)
 BOX_B = (200.0, 140.0, 300.0, 220.0)
@@ -600,5 +600,42 @@ def test_pipeline_reports_reconnecting(tmp_path):
         assert wait_until(lambda: rig.pipeline.status().source_state == "ended", 5.0)
         source.state = "reconnecting"
         assert rig.pipeline.status().source_state == "ended"  # never overwritten
+    finally:
+        rig.close()
+
+
+def test_pipeline_starts_and_stops_telemetry(tmp_path):
+    video = make_video(tmp_path / "v.mp4", 10)
+    tel = FakeTelemetry(state="waiting")
+    rig = Rig(tmp_path, video, FakeDetector(lambda i: []))
+    rig.pipeline._telemetry = tel  # type: ignore[attr-defined]
+    try:
+        assert rig.pipeline.status().telemetry_state == "waiting"
+        rig.pipeline.start()
+        assert tel.started == 1
+        assert rig.pipeline.wait(30) is True
+        assert tel.stopped == 0  # runs until the engine stops, even after the file ends
+        rig.pipeline.stop()
+        assert tel.stopped == 1
+        rig.pipeline.stop()
+        assert tel.stopped == 1
+    finally:
+        rig.close()
+
+
+def test_telemetry_start_failure_does_not_stop_detection(tmp_path, caplog):
+    class Boom(FakeTelemetry):
+        def start(self):
+            raise OSError("udpin:0.0.0.0:14551")
+
+    video = make_video(tmp_path / "v.mp4", 10)
+    rig = Rig(tmp_path, video, FakeDetector(lambda i: []))
+    rig.pipeline._telemetry = Boom()  # type: ignore[attr-defined]
+    try:
+        with caplog.at_level(logging.WARNING):
+            rig.pipeline.start()
+        assert rig.pipeline.wait(30) is True
+        assert rig.pipeline.status().frames_processed == 10
+        assert "14551" not in caplog.text
     finally:
         rig.close()

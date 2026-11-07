@@ -7,7 +7,7 @@ import logging
 import queue
 import threading
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -27,6 +27,7 @@ from engine.events.bus import EventBus
 from engine.events.manager import _iso, truck_to_json
 from engine.pipeline import Pipeline, RuntimeSettings
 from engine.storage import TruckRepository, media_dir
+from engine.telemetry import DronePose, NoTelemetry, Telemetry
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ BOUNDARY = "frame"
 STATUS_INTERVAL_S = 1.0
 WS_POLL_S = 0.05
 WS_GOING_AWAY = 1001
+TELEMETRY_MAX_POINTS = 600
 BUILD_HINT = "not built - run: cd dashboard && npm ci && npm run build, then reload this page"
 
 
@@ -67,10 +69,39 @@ class EngineContext:
     # Set when the engine is shutting down (Ctrl+C): long-lived responses
     # (MJPEG stream, WebSocket) end so the HTTP server can stop.
     shutdown: threading.Event = field(default_factory=threading.Event)
+    telemetry: Telemetry = field(default_factory=NoTelemetry)
+    telemetry_type: str = "none"  # "none" | "mavlink" | "dji_srt"
 
 
 def _runtime_json(runtime: RuntimeSettings) -> dict[str, Any]:
     return {"api": API_VERSION, "runtime": runtime.model_dump()}
+
+
+def _pose_json(ctx: EngineContext, pose: DronePose | None) -> dict[str, Any] | None:
+    if pose is None:
+        return None
+    t_iso = None
+    if ctx.telemetry_type == "mavlink":  # only live poses carry epoch seconds
+        try:
+            t_iso = _iso(datetime.fromtimestamp(pose.ts, tz=timezone.utc))
+        except (OverflowError, OSError, ValueError):
+            t_iso = None
+    return {
+        "lat": pose.lat,
+        "lon": pose.lon,
+        "alt_agl_m": pose.alt_agl_m,
+        "yaw_deg": pose.yaw_deg,
+        "t_iso": t_iso,
+    }
+
+
+def _thin(poses: list[DronePose], limit: int = TELEMETRY_MAX_POINTS) -> list[DronePose]:
+    """At most `limit` evenly spaced poses; the last one is always kept."""
+    n = len(poses)
+    if n <= limit:
+        return poses
+    picks = {round(i * (n - 1) / (limit - 1)) for i in range(limit)}
+    return [poses[i] for i in sorted(picks)]
 
 
 async def _status_json(ctx: EngineContext) -> dict[str, Any]:
@@ -127,6 +158,18 @@ def create_app(ctx: EngineContext) -> FastAPI:
     @app.get("/api/info")
     def info() -> dict[str, Any]:
         return {"api": API_VERSION, "info": {**ctx.info, "dashboard": has_index()}}
+
+    @app.get("/api/telemetry")
+    def telemetry(
+        seconds: Annotated[int, Query(ge=1, le=3600)] = 300,
+    ) -> dict[str, Any]:
+        tel = ctx.telemetry
+        return {
+            "api": API_VERSION,
+            "state": tel.state,
+            "latest": _pose_json(ctx, tel.latest()),
+            "track": [[p.lat, p.lon] for p in _thin(tel.track(seconds))],
+        }
 
     @app.get("/", response_model=None)
     def root() -> Any:
@@ -236,6 +279,8 @@ def create_app(ctx: EngineContext) -> FastAPI:
         q = ctx.bus.subscribe()
         loop = asyncio.get_running_loop()
         next_status = 0.0
+        next_telemetry = 0.0
+        last_pose: tuple[float, float, float] | None = None
         try:
             while not ctx.shutdown.is_set():
                 if loop.time() >= next_status:
@@ -243,6 +288,16 @@ def create_app(ctx: EngineContext) -> FastAPI:
                     await ws.send_json(
                         {"api": API_VERSION, "type": "status", "status": await _status_json(ctx)}
                     )
+                if ctx.telemetry_type != "none" and loop.time() >= next_telemetry:
+                    next_telemetry = loop.time() + STATUS_INTERVAL_S
+                    pose = ctx.telemetry.latest()
+                    key = None if pose is None else (pose.ts, pose.lat, pose.lon)
+                    if pose is not None and key != last_pose:
+                        last_pose = key
+                        await ws.send_json(
+                            {"api": API_VERSION, "type": "telemetry",
+                             "latest": _pose_json(ctx, pose)}
+                        )
                 try:
                     msg = q.get_nowait()
                 except queue.Empty:
