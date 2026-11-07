@@ -48,9 +48,12 @@ class TelegramNotifier:
         rel = unquote(urlsplit(url).path[len("/media/"):])
         if not rel:
             return None
-        root = self._media_root.resolve()
-        path = (root / rel).resolve()
-        if not path.is_relative_to(root) or not path.is_file():
+        try:
+            root = self._media_root.resolve()
+            path = (root / rel).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                return None
+        except (OSError, ValueError):  # e.g. an embedded NUL from %00
             return None
         return path
 

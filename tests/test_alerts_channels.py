@@ -118,6 +118,12 @@ def test_telegram_path_traversal_falls_back(tmp_path):
     assert len(seen) == 2 and all(r.url.path.endswith("/sendMessage") for r in seen)
 
 
+def test_telegram_nul_in_crop_url_falls_back(tmp_path):
+    seen, handler = recorder()
+    make_tg(tmp_path, handler).send(AlertBatch((truck(crop="/media/a%00b.jpg"),)))
+    assert seen[0].url.path.endswith("/sendMessage")
+
+
 def test_telegram_test_batch(tmp_path):
     seen, handler = recorder()
     make_tg(tmp_path, handler).send(AlertBatch((), is_test=True))
@@ -164,21 +170,28 @@ def test_telegram_default_client_timeout(tmp_path):
 
 # ---------------- mqtt ----------------
 class FakeInfo:
-    def __init__(self, published=True):
-        self._p = published
+    def __init__(self, rc):
+        self.rc = rc
 
     def wait_for_publish(self, timeout=None):
-        pass
+        if self.rc != 0:
+            raise RuntimeError("Message is not queued due to ERROR_QUEUE_SIZE")
 
     def is_published(self):
-        return self._p
+        return self.rc == 0
 
 
 class FakeClient:
-    def __init__(self, **kw):
+    """Faithful to paho 2.x: no publish success while disconnected; connect via on_connect."""
+
+    def __init__(self, auto_connect=True, **kw):
         self.kw = kw
         self.calls = []
-        self.published = True
+        self.auto_connect = auto_connect
+        self.connected = False
+        self.on_connect = None
+        self.on_disconnect = None
+        self.ack = True
 
     def username_pw_set(self, u, p=None):
         self.calls.append(("auth", u, p))
@@ -186,11 +199,27 @@ class FakeClient:
     def tls_set(self):
         self.calls.append(("tls",))
 
+    def max_queued_messages_set(self, n):
+        self.calls.append(("maxq", n))
+
     def connect_async(self, host, port):
         self.calls.append(("connect", host, port))
 
     def loop_start(self):
         self.calls.append(("loop_start",))
+        if self.auto_connect:
+            self.do_connect()
+
+    def do_connect(self):
+        self.connected = True
+        self.on_connect(self, None, {}, 0, None)
+
+    def do_disconnect(self):
+        self.connected = False
+        self.on_disconnect(self, None, {}, 0, None)
+
+    def is_connected(self):
+        return self.connected
 
     def loop_stop(self):
         self.calls.append(("loop_stop",))
@@ -200,7 +229,12 @@ class FakeClient:
 
     def publish(self, topic, payload, qos=0, retain=False):
         self.calls.append(("publish", topic, json.loads(payload), qos))
-        return FakeInfo(self.published)
+        return FakeInfo(0 if (self.connected and self.ack) else 4)
+
+
+def mk(client, **kw):
+    kw.setdefault("connect_timeout_s", 0.2)
+    return MqttNotifier("b", client_factory=lambda **k: client, **kw)
 
 
 def test_mqtt_lazy_connect_and_publish():
@@ -221,7 +255,8 @@ def test_mqtt_lazy_connect_and_publish():
     assert c.kw["callback_api_version"].name == "VERSION2"
     kinds = [x[0] for x in c.calls]
     assert kinds.count("connect") == 1 and kinds.count("loop_start") == 1
-    assert ("auth", "u", "pw") in c.calls and ("tls",) in c.calls
+    assert ("auth", "u", "pw") in c.calls and ("tls",) in c.calls and ("maxq", 100) in c.calls
+    assert kinds.index("loop_start") < kinds.index("publish")
     pubs = [x for x in c.calls if x[0] == "publish"]
     assert [p[1] for p in pubs] == ["t/e"] * 3 and all(p[3] == 1 for p in pubs)
     assert pubs[0][2] == {"api": 1, "type": "truck.new", "truck": truck(1)}
@@ -230,16 +265,55 @@ def test_mqtt_lazy_connect_and_publish():
     assert [x[0] for x in c.calls].count("disconnect") == 1
 
 
+def test_mqtt_first_send_waits_for_async_connect():
+    import threading
+
+    c = FakeClient(auto_connect=False)
+    threading.Timer(0.1, c.do_connect).start()
+    mk(c, connect_timeout_s=2.0).send(AlertBatch((truck(),)))
+    assert [x[0] for x in c.calls].count("publish") == 1
+
+
+def test_mqtt_never_connects_raises_without_publish():
+    c = FakeClient(auto_connect=False)
+    n = mk(c)
+    for _ in range(3):
+        with pytest.raises(AlertError, match="not connected"):
+            n.send(AlertBatch((truck(),)))
+    kinds = [x[0] for x in c.calls]
+    assert "publish" not in kinds and kinds.count("loop_start") == 1
+
+
+def test_mqtt_disconnected_queues_nothing_then_recovers():
+    c = FakeClient()
+    n = mk(c)
+    n.send(AlertBatch((truck(1),)))
+    c.do_disconnect()
+    with pytest.raises(AlertError):
+        n.send(AlertBatch((truck(2),)))
+    assert [x[0] for x in c.calls].count("publish") == 1
+    c.do_connect()
+    n.send(AlertBatch((truck(3),)))
+    assert [x[0] for x in c.calls].count("publish") == 2
+    assert [x[0] for x in c.calls].count("loop_start") == 1
+
+
 def test_mqtt_test_batch():
     c = FakeClient()
-    n = MqttNotifier("b", client_factory=lambda **kw: c)
-    n.send(AlertBatch((), is_test=True))
+    mk(c).send(AlertBatch((), is_test=True))
     assert c.calls[-1][2] == {"api": 1, "type": "alert.test"}
 
 
 def test_mqtt_publish_failure_raises():
     c = FakeClient()
-    c.published = False
-    n = MqttNotifier("b", client_factory=lambda **kw: c)
+    c.ack = False  # connected but publish rejected (rc != 0)
     with pytest.raises(AlertError):
-        n.send(AlertBatch((truck(),)))
+        mk(c).send(AlertBatch((truck(),)))
+
+
+def test_real_paho_client_constructs():
+    import paho.mqtt.client as pm
+
+    c = pm.Client(callback_api_version=pm.CallbackAPIVersion.VERSION2)
+    c.max_queued_messages_set(100)
+    assert c.is_connected() is False
