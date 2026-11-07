@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from engine.alerts.core import AlertBatch, AlertDispatcher
+from engine.alerts.core import AlertBatch, AlertDispatcher, AlertError
 from engine.events.bus import EventBus
 
 
@@ -181,6 +181,45 @@ def test_retries_then_drops(running, clock, caplog):
     err = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert "telegram" in err[0].getMessage()
     assert "SECRET" not in caplog.text and "token=" not in caplog.text
+
+
+class FailWith:
+    def __init__(self, name: str, exc: Exception) -> None:
+        self.name = name
+        self.attempts = 0
+        self._exc = exc
+
+    def send(self, batch: AlertBatch) -> None:
+        self.attempts += 1
+        raise self._exc
+
+
+def test_alert_error_text_is_logged_redacted(running, clock, caplog):
+    caplog.set_level(logging.WARNING)
+    exc = AlertError(
+        "telegram sendMessage failed (HTTP 400): chat not found "
+        "(https://api.telegram.org/bot123:SECRET-x/sendMessage)"
+    )
+    n = FailWith("telegram", exc)
+    bus, d = running([n], clock=clock, sleep=lambda s: None)
+    bus.publish(new(1))
+    assert wait_until(lambda: any(r.levelno == logging.ERROR for r in caplog.records))
+    warns = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warns) == 4 and all("HTTP 400): chat not found" in w for w in warns)
+    assert "SECRET" not in caplog.text and "bot***" in caplog.text
+    err = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert "dropping batch of 1" in err[0]
+
+
+def test_failed_test_alert_is_named_in_the_log(running, clock, caplog):
+    caplog.set_level(logging.WARNING)
+    n = FailWith("mqtt", AlertError("mqtt broker not connected"))
+    bus, d = running([n], clock=clock, sleep=lambda s: None)
+    d.send_test()
+    assert wait_until(lambda: any(r.levelno == logging.ERROR for r in caplog.records))
+    err = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert "mqtt" in err[0] and "test alert" in err[0] and "batch of 0" not in caplog.text
+    assert "mqtt broker not connected" in caplog.text
 
 
 def test_failing_channel_never_blocks_publish(running, clock):

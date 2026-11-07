@@ -380,7 +380,7 @@ test("an older response for the same channel cannot overwrite a newer choice", a
   expect(telegram).toBeChecked();
 });
 
-test("send test alert shows the channels it reached", async () => {
+test("send test alert shows the channels it was queued for", async () => {
   const { c } = setup({ info: ALERT_INFO, runtime: ALERT_RT });
   let resolve!: (s: string[]) => void;
   c.sendTestAlert.mockImplementationOnce(() => new Promise<string[]>((res) => (resolve = res)));
@@ -391,7 +391,10 @@ test("send test alert shows the channels it reached", async () => {
   expect(button).toBeDisabled();
   await act(async () => resolve(["desktop", "telegram"]));
   expect(button).toBeEnabled();
-  expect(screen.getByText("Sent to: Laptop, Telegram")).toBeInTheDocument();
+  expect(
+    screen.getByText("Test queued for: Laptop, Telegram — check the engine log if nothing arrives."),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/Sent to/)).not.toBeInTheDocument();
 });
 
 test("send test alert with nothing switched on, and with an error", async () => {

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from engine.events.bus import EventBus, Subscription
+from engine.logging_setup import redact_secrets
 
 log = logging.getLogger("engine.alerts")
 
@@ -37,6 +38,14 @@ class AlertBatch:
 
 class AlertError(Exception):
     """A notifier failed to deliver; the text is safe to log (no secrets)."""
+
+
+def _describe(exc: BaseException) -> str:
+    """An exception for the log: an AlertError's own (sanitized) text, run through the
+    log redaction once more; any other exception by type only (it may carry secrets)."""
+    if isinstance(exc, AlertError):
+        return redact_secrets(f"{exc}") or type(exc).__name__
+    return type(exc).__name__
 
 
 class Notifier(Protocol):
@@ -200,8 +209,8 @@ class AlertDispatcher:
         while not stop.is_set():
             try:
                 self._step(ch, stop)
-            except Exception as exc:  # never let the worker die; type only, no data
-                log.error("alert worker error on channel %s: %s", ch.name, type(exc).__name__)
+            except Exception as exc:  # never let the worker die; no data from the exception
+                log.error("alert worker error on channel %s: %s", ch.name, _describe(exc))
                 stop.wait(_POLL_S)
 
     def _step(self, ch: _Channel, stop: threading.Event) -> None:
@@ -269,14 +278,12 @@ class AlertDispatcher:
             try:
                 ch.notifier.send(batch)
                 return
-            except Exception as exc:  # message may carry secrets: log type only
+            except Exception as exc:  # only an AlertError's text is safe to log
                 log.warning(
                     "alert send failed on channel %s (attempt %d/%d): %s",
-                    ch.name, i + 1, attempts, type(exc).__name__,
+                    ch.name, i + 1, attempts, _describe(exc),
                 )
             if i < len(self._retries):
                 self._sleep(self._retries[i], stop)
-        log.error(
-            "alert channel %s failed after %d attempts; dropping batch of %d",
-            ch.name, attempts, len(batch.trucks),
-        )
+        what = "test alert" if batch.is_test else f"batch of {len(batch.trucks)}"
+        log.error("alert channel %s failed after %d attempts; dropping %s", ch.name, attempts, what)

@@ -181,7 +181,7 @@ export default function StatusPage() {
           ok: true,
           text:
             sent.length > 0
-              ? `Sent to: ${sent.map(formatAlertChannel).join(", ")}`
+              ? `Test queued for: ${sent.map(formatAlertChannel).join(", ")} — check the engine log if nothing arrives.`
               : "No channel is switched on",
         });
       })
