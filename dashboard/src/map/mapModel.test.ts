@@ -4,29 +4,33 @@ import {
   AGE_COLORS,
   MAX_TRACK_POINTS,
   ageBucket,
+  layerState,
+  reconcileMarkers,
+  type LayerState,
   appendTrack,
   isLocated,
   planMarkers,
 } from "./mapModel";
 
-// 11:33 on 6 Nov 2026 in Asia/Kolkata (the zone the tests run in).
-const NOW = new Date("2026-11-06T06:03:00Z");
+// Local clock times (Date constructors), so the local-day buckets hold in any time zone.
+const at = (day: number, h: number, min: number, s = 0) =>
+  new Date(2026, 10, day, h, min, s).toISOString();
+const NOW = new Date(2026, 10, 6, 11, 33, 0);
 
 describe("ageBucket", () => {
   test("last hour, earlier today (local day), older", () => {
-    expect(ageBucket("2026-11-06T05:30:00Z", NOW)).toBe("recent");
-    expect(ageBucket("2026-11-06T05:03:01Z", NOW)).toBe("recent");
-    // 90 minutes ago, still today in India
-    expect(ageBucket("2026-11-06T04:33:00Z", NOW)).toBe("today");
-    // 00:30 local on 6 Nov
-    expect(ageBucket("2026-11-05T19:00:00Z", NOW)).toBe("today");
-    // 23:30 local on 5 Nov
-    expect(ageBucket("2026-11-05T18:00:00Z", NOW)).toBe("older");
+    expect(ageBucket(at(6, 11, 0), NOW)).toBe("recent");
+    expect(ageBucket(at(6, 10, 33, 1), NOW)).toBe("recent");
+    // 90 minutes ago, still today
+    expect(ageBucket(at(6, 10, 3), NOW)).toBe("today");
+    expect(ageBucket(at(6, 0, 30), NOW)).toBe("today");
+    // 23:30 the day before
+    expect(ageBucket(at(5, 23, 30), NOW)).toBe("older");
     expect(ageBucket("2026-10-01T00:00:00Z", NOW)).toBe("older");
   });
 
   test("a time in the future counts as recent", () => {
-    expect(ageBucket("2026-11-06T06:10:00Z", NOW)).toBe("recent");
+    expect(ageBucket(at(6, 11, 40), NOW)).toBe("recent");
   });
 
   test("three different colours", () => {
@@ -40,7 +44,7 @@ describe("planMarkers", () => {
     lon: 77.5,
     geo_error_m: 4.2,
     geo_status: "ok",
-    first_seen: "2026-11-06T05:50:00Z",
+    first_seen: at(6, 11, 20),
   });
   const rough = makeTruck(2, {
     lat: 12.6,
@@ -88,6 +92,61 @@ describe("appendTrack", () => {
     expect(after).toEqual([
       [1, 1],
       [2, 2],
+    ]);
+  });
+});
+
+describe("reconcileMarkers", () => {
+  const a = makeTruck(1, {
+    lat: 1,
+    lon: 2,
+    geo_error_m: 3,
+    geo_status: "ok",
+    first_seen: at(6, 11, 20),
+  });
+  const b = makeTruck(2, {
+    lat: 3,
+    lon: 4,
+    geo_error_m: 90,
+    geo_status: "unreliable",
+    first_seen: at(6, 11, 20),
+  });
+
+  function drawnFrom(trucks: (typeof a)[], now: Date) {
+    return new Map<number, LayerState>(
+      planMarkers(trucks, now).map((p) => [p.truck.id, layerState(p)]),
+    );
+  }
+
+  test("unchanged trucks are left alone, so their popups stay open", () => {
+    const drawn = drawnFrom([a, b], NOW);
+    expect(reconcileMarkers(drawn, planMarkers([a, b], NOW))).toEqual([]);
+    // an update message with the same data (a new object) changes nothing either
+    expect(reconcileMarkers(drawn, planMarkers([{ ...a }, { ...b }], NOW))).toEqual([]);
+  });
+
+  test("only what changed is touched", () => {
+    const drawn = drawnFrom([a, b], NOW);
+    const c = makeTruck(3, {
+      lat: 5,
+      lon: 6,
+      geo_error_m: 3,
+      geo_status: "ok",
+      first_seen: at(6, 11, 25),
+    });
+    const moved = { ...a, lat: 1.5 };
+    expect(reconcileMarkers(drawn, planMarkers([moved, c], NOW))).toEqual([
+      { action: "replace", plan: expect.objectContaining({ truck: moved }) },
+      { action: "add", plan: expect.objectContaining({ truck: c }) },
+      { action: "remove", id: 2 },
+    ]);
+  });
+
+  test("a new age bucket only recolours", () => {
+    const drawn = drawnFrom([a], NOW);
+    const later = new Date(2026, 10, 6, 13, 0, 0);
+    expect(reconcileMarkers(drawn, planMarkers([a], later))).toEqual([
+      { action: "recolor", plan: expect.objectContaining({ color: AGE_COLORS.today }) },
     ]);
   });
 });

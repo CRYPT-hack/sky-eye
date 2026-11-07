@@ -40,7 +40,8 @@ const FIX: DronePosition = {
   t_iso: "2026-11-06T06:00:00Z",
 };
 
-// 11:33 on 6 Nov 2026 in Asia/Kolkata, so "today" is 2026-11-06 and all trucks below fall in it.
+// Noon on 6 Nov 2026 local time, so "today" is 2026-11-06 in any time zone.
+const NOW = new Date(2026, 10, 6, 12, 0, 0);
 const TODAY = localDayRange("2026-11-06", "2026-11-06");
 
 function located(id: number, over: Partial<Truck> = {}): Truck {
@@ -49,13 +50,14 @@ function located(id: number, over: Partial<Truck> = {}): Truck {
     lon: 77 + id / 1000,
     geo_error_m: 3,
     geo_status: "ok",
+    first_seen: new Date(2026, 10, 6, 9, 0, id).toISOString(),
     ...over,
   });
 }
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
-  vi.setSystemTime(new Date("2026-11-06T06:03:04Z"));
+  vi.setSystemTime(NOW);
   h.created.length = 0;
   for (const fn of Object.values(h.view)) fn.mockClear();
 });
@@ -308,7 +310,7 @@ test("live trucks inside the range appear, others are ignored, updates replace",
   await loaded([1, 2]);
 
   act(() =>
-    live.send({ type: "truck.new", truck: located(3, { first_seen: "2026-11-01T00:00:00Z" }) }),
+    live.send({ type: "truck.new", truck: located(3, { first_seen: new Date(2026, 10, 1, 9, 0, 0).toISOString() }) }),
   );
   expect(lastTrucks().map((t) => t.id)).not.toContain(3);
 
@@ -361,4 +363,45 @@ test("leaving the page destroys the map and closes the live connection", async (
   view.unmount();
   expect(h.view.destroy).toHaveBeenCalledTimes(1);
   expect(live.stops[0]).toHaveBeenCalled();
+});
+
+test("marker colours are planned again every minute", async () => {
+  const timers = vi.spyOn(globalThis, "setInterval");
+  setup({ trucks: () => [located(1)] });
+  await loaded([1]);
+  const tick = timers.mock.calls.find((c) => c[1] === 60_000)?.[0] as () => void;
+  expect(typeof tick).toBe("function");
+  const before = h.view.setTrucks.mock.calls.length;
+  vi.setSystemTime(new Date(2026, 10, 6, 13, 0, 0));
+  act(() => tick());
+  expect(h.view.setTrucks).toHaveBeenCalledTimes(before + 1);
+  expect(h.view.setTrucks.mock.calls.at(-1)?.[1]).toEqual(new Date(2026, 10, 6, 13, 0, 0));
+  timers.mockRestore();
+});
+
+test("after a reconnect the trucks and the track are fetched again, without a blank gap", async () => {
+  const { c, live } = setup({
+    trucks: () => [located(1)],
+    telemetry: { state: "ok", latest: FIX, track: [[12.5, 77.5]] },
+  });
+  await loaded([1]);
+  await waitFor(() => expect(c.getTelemetry).toHaveBeenCalledTimes(1));
+  const trucksBefore = c.listTrucks.mock.calls.length;
+  const blanks = () => h.view.setTrucks.mock.calls.filter((call) => call[0].length === 0).length;
+  const blanksBefore = blanks();
+
+  c.listTrucks.mockImplementation(async () => ({
+    trucks: [located(1), located(2)],
+    limit: 200,
+    offset: 0,
+  }));
+  act(() => live.state("open"));
+  act(() => live.state("reconnecting"));
+  expect(c.listTrucks).toHaveBeenCalledTimes(trucksBefore); // dropping is not enough
+  act(() => live.state("open"));
+  await loaded([1, 2]);
+  expect(c.listTrucks).toHaveBeenCalledTimes(trucksBefore + 1);
+  await waitFor(() => expect(c.getTelemetry).toHaveBeenCalledTimes(2));
+  // the rows stayed on screen while the missed ones were fetched
+  expect(blanks()).toBe(blanksBefore);
 });

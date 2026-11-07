@@ -5,7 +5,15 @@ import "leaflet/dist/leaflet.css";
 import type { DronePosition, Truck } from "../api/types";
 import { formatScore, formatTime } from "../format";
 import { href } from "../router";
-import { ATTRIBUTION_URL, DRONE_COLOR, planMarkers, type MarkerPlan } from "./mapModel";
+import {
+  ATTRIBUTION_URL,
+  DRONE_COLOR,
+  layerState,
+  planMarkers,
+  reconcileMarkers,
+  type LayerState,
+  type MarkerPlan,
+} from "./mapModel";
 
 export interface MapViewOptions {
   tileUrl: string;
@@ -27,7 +35,7 @@ export interface MapView {
 const OUTLINE = "#1a1a1a";
 
 /** A truck's popup: crop thumbnail, local time, score and a link to its page. Built with DOM calls, never HTML strings. */
-function popupContent(truck: Truck, mediaUrl: (path: string) => string): HTMLElement {
+export function popupContent(truck: Truck, mediaUrl: (path: string) => string): HTMLElement {
   const root = document.createElement("div");
   root.className = "map-popup";
   if (truck.crop_url) {
@@ -60,6 +68,8 @@ export function createMapView(el: HTMLElement, opts: MapViewOptions): MapView {
   const track = L.polyline([], { color: DRONE_COLOR, weight: 3, opacity: 0.85 }).addTo(droneLayer);
   let droneMarker: L.CircleMarker | null = null;
 
+  const drawn = new Map<number, { layer: L.Path; state: LayerState }>();
+
   function draw(plan: MarkerPlan): L.Path {
     const common = { color: OUTLINE, weight: 2 };
     if (plan.kind === "point") {
@@ -83,9 +93,31 @@ export function createMapView(el: HTMLElement, opts: MapViewOptions): MapView {
 
   return {
     setTrucks(trucks, now) {
-      truckLayer.clearLayers();
-      for (const plan of planMarkers(trucks, now)) {
-        draw(plan).bindPopup(() => popupContent(plan.truck, opts.mediaUrl)).addTo(truckLayer);
+      const plans = planMarkers(trucks, now);
+      const states = new Map([...drawn].map(([id, d]) => [id, d.state]));
+      for (const change of reconcileMarkers(states, plans)) {
+        if (change.action === "remove") {
+          drawn.get(change.id)?.layer.remove();
+          drawn.delete(change.id);
+          continue;
+        }
+        const { plan } = change;
+        const id = plan.truck.id;
+        if (change.action === "recolor") {
+          const entry = drawn.get(id)!;
+          entry.layer.setStyle(
+            plan.kind === "point"
+              ? { fillColor: plan.color }
+              : { color: plan.color, fillColor: plan.color },
+          );
+          entry.state = layerState(plan);
+          continue;
+        }
+        drawn.get(id)?.layer.remove();
+        const layer = draw(plan)
+          .bindPopup(() => popupContent(plan.truck, opts.mediaUrl))
+          .addTo(truckLayer);
+        drawn.set(id, { layer, state: layerState(plan) });
       }
     },
 

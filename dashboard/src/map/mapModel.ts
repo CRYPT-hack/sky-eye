@@ -84,3 +84,47 @@ export function appendTrack(
   const next: [number, number][] = [...track, [latest.lat, latest.lon]];
   return next.length > MAX_TRACK_POINTS ? next.slice(next.length - MAX_TRACK_POINTS) : next;
 }
+
+/** What a drawn layer was made from: `shape` is geometry and popup inputs, `color` the age colour. */
+export interface LayerState {
+  shape: string;
+  color: string;
+}
+
+function shapeKey(plan: MarkerPlan): string {
+  const t = plan.truck;
+  const radius = plan.kind === "area" ? plan.radiusM : "";
+  return [plan.kind, plan.lat, plan.lon, radius, t.crop_url, t.first_seen, t.best_score].join("|");
+}
+
+export type LayerChange =
+  | { action: "add" | "replace" | "recolor"; plan: MarkerPlan }
+  | { action: "remove"; id: number };
+
+/**
+ * What to do to the layers already on the map so they match `plans`. A layer whose shape
+ * and colour are unchanged is not listed, so it stays as it is (and keeps an open popup);
+ * a colour-only change recolours in place; a moved or edited truck is replaced.
+ */
+export function reconcileMarkers(
+  drawn: ReadonlyMap<number, LayerState>,
+  plans: readonly MarkerPlan[],
+): LayerChange[] {
+  const changes: LayerChange[] = [];
+  const wanted = new Set<number>();
+  for (const plan of plans) {
+    const id = plan.truck.id;
+    wanted.add(id);
+    const have = drawn.get(id);
+    if (!have) changes.push({ action: "add", plan });
+    else if (have.shape !== shapeKey(plan)) changes.push({ action: "replace", plan });
+    else if (have.color !== plan.color) changes.push({ action: "recolor", plan });
+  }
+  for (const id of drawn.keys()) if (!wanted.has(id)) changes.push({ action: "remove", id });
+  return changes;
+}
+
+/** The state to remember for a layer just drawn from `plan`. */
+export function layerState(plan: MarkerPlan): LayerState {
+  return { shape: shapeKey(plan), color: plan.color };
+}

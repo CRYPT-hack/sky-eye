@@ -24,7 +24,8 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     // Vitest blanks CSS imports by default; let `?raw` imports through so tests can read the real file.
     css: { include: [/\.css\?raw$/] },
-    // Fixed zone so time-formatting tests give the same result on every machine.
-    env: { TZ: "Asia/Kolkata" },
+    // Fixed zone so time-formatting tests give the same result on every machine;
+    // run with TZ=... to check that a test does not depend on it.
+    env: { TZ: (globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env.TZ ?? "Asia/Kolkata" },
   },
 });

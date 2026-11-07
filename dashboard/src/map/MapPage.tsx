@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError } from "../api/client";
-import { connectLive } from "../api/live";
+import { connectLive, type LiveState } from "../api/live";
 import type { DronePosition, Info, Status, Truck } from "../api/types";
 import { useApi } from "../apiContext";
 import Banner from "../components/Banner";
@@ -20,6 +20,9 @@ const PAGE_SIZE = 200;
 const MAX_TRUCKS = 1000;
 /** How much drone track to ask the engine for when the page opens. */
 const TRACK_SECONDS = 300;
+
+/** Marker colours follow the clock: re-plan them this often. */
+const RECOLOR_MS = 60_000;
 
 const AGE_ORDER: AgeBucket[] = ["recent", "today", "older"];
 
@@ -75,6 +78,11 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
   const [view, setView] = useState<MapView | null>(null);
   /** Goes up whenever a fresh set of data arrives, so the map zooms to it once. */
   const [fitTick, setFitTick] = useState(0);
+  /** Goes up every minute so "Last hour" markers turn into "Earlier today" on a quiet page. */
+  const [clock, setClock] = useState(0);
+  /** Goes up after each live reconnect: the trucks and track are fetched again. */
+  const [gaps, setGaps] = useState(0);
+  const quietReload = useRef(false);
 
   const mapEl = useRef<HTMLDivElement>(null);
   const range = localDayRange(applied.from, applied.to);
@@ -123,7 +131,7 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
       .then((t) => {
         if (cancelled) return;
         setDrone({ latest: t.latest, track: t.track });
-        setFitTick((n) => n + 1);
+        if (gaps === 0) setFitTick((n) => n + 1);
       })
       .catch((e: unknown) => {
         if (!cancelled && e instanceof ApiError && e.status === 401) reportRef.current();
@@ -131,15 +139,20 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
     return () => {
       cancelled = true;
     };
-  }, [client, authEpoch, telemetryMode]);
+  }, [client, authEpoch, telemetryMode, gaps]);
 
   // Every truck in the range, a page at a time, up to MAX_TRUCKS.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setFailed(false);
-    setCapped(false);
-    setTrucks([]);
+    // After a reconnect the rows on screen stay while the missed ones are fetched.
+    const quiet = quietReload.current;
+    quietReload.current = false;
+    if (!quiet) {
+      setLoading(true);
+      setFailed(false);
+      setCapped(false);
+      setTrucks([]);
+    }
     const wanted = localDayRange(applied.from, applied.to);
     void (async () => {
       try {
@@ -160,11 +173,11 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
         // Trucks that arrived live while the pages were loading are newer: they win.
         setTrucks((live) => mergeById(loaded, live));
         setCapped(hitCap);
-        setFitTick((n) => n + 1);
+        if (!quiet) setFitTick((n) => n + 1);
       } catch (e) {
         if (cancelled) return;
         if (e instanceof ApiError && e.status === 401) reportRef.current();
-        else setFailed(true);
+        else if (!quiet) setFailed(true);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -176,6 +189,7 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
 
   // One live connection: trucks in the range, drone positions and the status.
   useEffect(() => {
+    let prev: LiveState = "connecting";
     return connect({
       url: () => client.liveUrl(),
       onMessage: (m) => {
@@ -190,6 +204,13 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
       },
       onState: (s) => {
         if (s === "unauthorized") reportRef.current();
+        // Back after a gap: fetch what was missed (the page's trucks and the drone track).
+        if (prev === "reconnecting" && s === "open") {
+          quietReload.current = true;
+          setRetry((n) => n + 1);
+          setGaps((n) => n + 1);
+        }
+        prev = s;
       },
     });
   }, [client, authEpoch, connect]);
@@ -212,8 +233,13 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
   }, [client, tileUrl]);
 
   useEffect(() => {
+    const id = setInterval(() => setClock((n) => n + 1), RECOLOR_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
     view?.setTrucks(trucks, new Date());
-  }, [view, trucks]);
+  }, [view, trucks, clock]);
   useEffect(() => {
     view?.setDrone(drone.latest, drone.track);
   }, [view, drone]);

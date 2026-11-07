@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, type ReactNode } from "react";
 import { ApiProvider, useApi } from "./apiContext";
 import TokenPrompt from "./components/TokenPrompt";
+import LoadErrorBoundary from "./components/LoadErrorBoundary";
 import LivePage from "./live/LivePage";
 import StatusPage from "./status/StatusPage";
 import TruckDetail from "./trucks/TruckDetail";
@@ -158,9 +159,11 @@ function Shell() {
           ) : route.page === "truck" ? (
             <TruckDetail id={route.id} />
           ) : route.page === "map" ? (
-            <Suspense fallback={<p className="muted">Loading map…</p>}>
-              <MapPage />
-            </Suspense>
+            <LoadErrorBoundary message="Could not load the map — reload the page">
+              <Suspense fallback={<p className="muted">Loading map…</p>}>
+                <MapPage />
+              </Suspense>
+            </LoadErrorBoundary>
           ) : (
             <StatusPage />
           )}
