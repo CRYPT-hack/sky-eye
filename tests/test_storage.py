@@ -274,3 +274,17 @@ def test_migration_is_one_transaction(tmp_path, monkeypatch):
     conn.close()
     assert "clip_status" not in cols  # ALTER rolled back with the failed backfill
 
+
+def test_fail_pending_clips(repo):
+    run_id = repo.create_run("file:a.mp4", "{}")
+    ids = {
+        status: repo.insert_truck(make_rec(run_id, track_id=i, clip_status=status))
+        for i, status in enumerate(["pending", "saved", "skipped", "failed", "removed"])
+    }
+    other = repo.insert_truck(make_rec(run_id, track_id=9))  # pending by default
+    assert repo.fail_pending_clips() == 2
+    assert repo.get_truck(ids["pending"]).clip_status == "failed"
+    assert repo.get_truck(other).clip_status == "failed"
+    for status in ("saved", "skipped", "failed", "removed"):
+        assert repo.get_truck(ids[status]).clip_status == status
+    assert repo.fail_pending_clips() == 0

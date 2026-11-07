@@ -161,6 +161,16 @@ class TruckRepository:
             self._conn.commit()
         return [int(r[0]) for r in rows]
 
+    def fail_pending_clips(self) -> int:
+        """Mark every clip still "pending" as "failed"; return how many. For startup:
+        a clip of an earlier run that crashed or was killed can never finish."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE trucks SET clip_status = 'failed' WHERE clip_status = 'pending'"
+            )
+            self._conn.commit()
+            return int(cur.rowcount)
+
     def get_truck(self, truck_id: int) -> TruckRecord | None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM trucks WHERE id = ?", (truck_id,)).fetchone()

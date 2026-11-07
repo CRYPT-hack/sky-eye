@@ -220,8 +220,13 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             data_dir, cfg.evidence.clip_before_s, cfg.evidence.clip_after_s
         )
         repo = TruckRepository(data_dir / "sky-eye.db")
-        run_id = repo.create_run(label, _config_json(cfg))
         remove_partial_clips(media_dir(data_dir))
+        # before this run's trucks exist: any clip still pending is from a run that
+        # crashed or was killed, and will never be written
+        stale = repo.fail_pending_clips()
+        if stale:
+            log.info("%d clip(s) left pending by an earlier run marked as failed", stale)
+        run_id = repo.create_run(label, _config_json(cfg))
         bus = EventBus()
         manager = EventManager(
             repo,

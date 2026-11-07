@@ -157,6 +157,36 @@ def test_build_engine_closes_source_on_failure(tmp_path, monkeypatch):
     assert closed
 
 
+def test_build_engine_fails_clips_left_pending_by_a_crash(tmp_path, monkeypatch, caplog):
+    from datetime import datetime, timezone
+
+    from engine.storage import TruckRecord, TruckRepository
+
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    video = make_video(tmp_path / "v.mp4", 5)
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}"))
+    now = datetime.now(timezone.utc)
+    old = TruckRepository(cfg.evidence.data_dir / "sky-eye.db")
+    run_id = old.create_run("old", "{}")
+    stale = [
+        old.insert_truck(TruckRecord(None, run_id, i, now, now, 0.9, clip_status="pending"))
+        for i in range(2)
+    ]
+    saved = old.insert_truck(TruckRecord(None, run_id, 5, now, now, 0.9, clip_status="saved"))
+    old.close()  # an engine that was killed: its clips never finished
+    with caplog.at_level("INFO", logger="engine.app"):
+        ctx = build_engine(cfg)
+    try:
+        assert [ctx.repo.get_truck(i).clip_status for i in stale] == ["failed", "failed"]
+        assert ctx.repo.get_truck(saved).clip_status == "saved"
+        assert any(
+            "2" in r.getMessage() and "pending" in r.getMessage() for r in caplog.records
+        )
+    finally:
+        ctx.pipeline.stop()
+        ctx.repo.close()
+
+
 def test_load_dotenv_does_not_override(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text(
         "# comment\nSKY_A=one\nSKY_B=\"two words\"\nSKY_C='three'\n\nSKY_D = four\nbad line\n",
