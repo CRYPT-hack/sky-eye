@@ -33,7 +33,13 @@ class TelegramNotifier:
         self._chat_id = str(chat_id)
         self._media_root = Path(media_root)
         self._dashboard = dashboard_url.rstrip("/") if dashboard_url else None
+        self._owns_client = client is None
         self._client = client or httpx.Client(timeout=10.0)
+
+    def close(self) -> None:
+        """Close the HTTP client if this notifier created it; idempotent."""
+        if self._owns_client:
+            self._client.close()
 
     # -- helpers -----------------------------------------------------------
     def _redact(self, text: str) -> str:

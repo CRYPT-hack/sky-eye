@@ -1,10 +1,14 @@
 import json
 import logging
+import socket
+import threading
+import time
 from datetime import datetime
 
 import httpx
 import pytest
 
+import engine.alerts.mqtt as mqtt_mod
 from engine.alerts.core import AlertBatch
 from engine.alerts.desktop import DesktopNotifier
 from engine.alerts.mqtt import MqttNotifier
@@ -227,6 +231,18 @@ def test_telegram_default_client_timeout(tmp_path):
     n._client.close()
 
 
+def test_telegram_close_closes_only_its_own_client(tmp_path):
+    own = TelegramNotifier(TOKEN, "42", tmp_path)
+    own.close()
+    own.close()  # idempotent
+    assert own._client.is_closed
+    seen, handler = recorder()
+    shared = httpx.Client(transport=httpx.MockTransport(handler))
+    TelegramNotifier(TOKEN, "42", tmp_path, client=shared).close()
+    assert not shared.is_closed
+    shared.close()
+
+
 # ---------------- mqtt ----------------
 class FakeInfo:
     def __init__(self, rc):
@@ -368,6 +384,107 @@ def test_mqtt_publish_failure_raises():
     c.ack = False  # connected but publish rejected (rc != 0)
     with pytest.raises(AlertError):
         mk(c).send(AlertBatch((truck(),)))
+
+
+def test_mqtt_close_disconnects_first_and_is_idempotent():
+    c = FakeClient()
+    n = mk(c)
+    n.send(AlertBatch((truck(),)))
+    n.close()
+    n.close()
+    kinds = [x[0] for x in c.calls]
+    assert kinds.count("disconnect") == 1 and kinds.count("loop_stop") == 1
+    # paho keeps looping while QoS-1 messages are unacked unless it is disconnected first
+    assert kinds.index("disconnect") < kinds.index("loop_stop")
+    with pytest.raises(AlertError, match="closed"):
+        n.send(AlertBatch((truck(),)))
+    assert [x[0] for x in c.calls].count("loop_start") == 1  # no new client after close
+
+
+class HalfOpenBroker:
+    """Loopback MQTT 'broker' on an ephemeral port: CONNACK, then it swallows
+    everything and never sends a PUBACK (a half-open link). Hard timeouts throughout."""
+
+    def __init__(self) -> None:
+        self._srv = socket.socket()
+        self._srv.bind(("127.0.0.1", 0))
+        self._srv.listen(1)
+        self._srv.settimeout(10)
+        self.port = self._srv.getsockname()[1]
+        self.got_publish = threading.Event()
+        self._conns: list[socket.socket] = []
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        try:
+            conn, _ = self._srv.accept()
+        except OSError:
+            return
+        self._conns.append(conn)
+        conn.settimeout(10)
+        try:
+            conn.recv(4096)  # CONNECT
+            conn.sendall(bytes([0x20, 0x02, 0x00, 0x00]))  # CONNACK: accepted
+            while conn.recv(4096):  # PUBLISH (and anything else): never acknowledged
+                self.got_publish.set()
+        except OSError:
+            return
+
+    def close(self) -> None:
+        for conn in self._conns:
+            conn.close()
+        self._srv.close()
+        self._thread.join(5)
+
+
+def timed(fn, limit: float = 10.0) -> float:
+    """Seconds fn() took in a helper thread; inf if it was still running after `limit`."""
+    done = threading.Event()
+
+    def run():
+        fn()
+        done.set()
+
+    t0 = time.monotonic()
+    threading.Thread(target=run, daemon=True).start()
+    return time.monotonic() - t0 if done.wait(limit) else float("inf")
+
+
+def test_mqtt_close_is_prompt_on_half_open_broker(monkeypatch):
+    monkeypatch.setattr(mqtt_mod, "_PUBLISH_TIMEOUT_S", 0.5)
+    broker = HalfOpenBroker()
+    n = MqttNotifier("127.0.0.1", broker.port, connect_timeout_s=5.0)
+    try:
+        with pytest.raises(AlertError, match="not acknowledged"):
+            n.send(AlertBatch((truck(),)))
+        assert timed(n.close) < 2.0
+    finally:
+        broker.close()
+
+
+def test_mqtt_close_does_not_wait_for_a_send_in_progress(monkeypatch):
+    monkeypatch.setattr(mqtt_mod, "_PUBLISH_TIMEOUT_S", 3.0)
+    broker = HalfOpenBroker()
+    n = MqttNotifier("127.0.0.1", broker.port, connect_timeout_s=5.0)
+    errors: list[BaseException] = []
+
+    def send():
+        try:
+            n.send(AlertBatch((truck(),)))
+        except BaseException as exc:  # noqa: BLE001 - recorded for the assertion
+            errors.append(exc)
+
+    sender = threading.Thread(target=send, daemon=True)
+    sender.start()
+    try:
+        assert broker.got_publish.wait(5)  # send() now holds the lock, waiting for a PUBACK
+        assert timed(n.close) < 2.0
+        sender.join(6)
+        assert not sender.is_alive()
+        assert len(errors) == 1 and isinstance(errors[0], AlertError)
+    finally:
+        broker.close()
 
 
 def test_real_paho_client_constructs():

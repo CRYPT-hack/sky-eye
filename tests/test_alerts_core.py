@@ -365,6 +365,38 @@ def test_stop_warns_when_notifier_stuck(caplog):
         d.stop(timeout=1.0)
 
 
+def test_stop_reports_dropped_held_alerts(clock, caplog):
+    caplog.set_level(logging.WARNING)
+    n = Fake("desktop")
+    bus = EventBus()
+    d = AlertDispatcher(bus, [n], enabled=lambda x: True, cooldown_s=10.0, clock=clock)
+    d.start()
+    try:
+        bus.publish(new(1))
+        assert wait_until(lambda: ids(n) == [[1]])
+        bus.publish(new(2))
+        bus.publish(new(3))
+        assert wait_until(lambda: pending(d) == 2)  # held by the cooldown
+        d.send_test()  # a test marker is not a held truck
+        assert d.stop() == 2
+        assert "dropped 2 held alert(s) (desktop: 2)" in caplog.text
+        assert d.stop() == 0  # nothing more to report
+    finally:
+        d.stop(timeout=1.0)
+
+
+def test_stop_without_held_alerts_logs_nothing(clock, caplog):
+    caplog.set_level(logging.WARNING)
+    n = Fake("desktop")
+    bus = EventBus()
+    d = AlertDispatcher(bus, [n], enabled=lambda x: True, clock=clock)
+    d.start()
+    bus.publish(new(1))
+    assert wait_until(lambda: ids(n) == [[1]])
+    assert d.stop() == 0
+    assert "held alert" not in caplog.text
+
+
 def test_restart_after_stop(clock):
     n = Fake("desktop")
     bus = EventBus()

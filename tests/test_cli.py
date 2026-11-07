@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import socket
@@ -12,9 +13,11 @@ import httpx
 import pytest
 
 import engine.app as app_mod
+from engine.alerts.core import AlertDispatcher
 from engine.app import build_engine, load_dotenv, main
 from engine.config import load_config
 from engine.detectors.fake import FakeDetector
+from engine.events.bus import EventBus
 from tests.conftest import make_video
 
 
@@ -343,6 +346,124 @@ def test_clean_stop_closes_repo():
     )
     app_mod.shutdown_engine(ctx)
     assert repo_closed == [1] and ctx.shutdown.is_set()
+
+
+def _wait_until(pred, timeout: float = 5.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.01)
+    return pred()
+
+
+class _StuckCloseNotifier:
+    """Delivers at once; close() hangs (e.g. a dead broker) until released."""
+
+    name = "mqtt"
+
+    def __init__(self, release: threading.Event) -> None:
+        self.batches: list = []
+        self._release = release
+
+    def send(self, batch) -> None:
+        self.batches.append(batch)
+
+    def close(self) -> None:
+        self._release.wait(30)
+
+
+def _truck_new(i: int) -> dict:
+    return {"api": 1, "type": "truck.new", "truck": {"id": i}}
+
+
+def test_alerts_shutdown_is_bounded_and_repo_always_closes(caplog):
+    caplog.set_level(logging.INFO)
+    release = threading.Event()
+    notifier = _StuckCloseNotifier(release)
+    bus = EventBus()
+    dispatcher = AlertDispatcher(bus, [notifier], enabled=lambda name: True, cooldown_s=60)
+    repo_closed: list = []
+    ctx = SimpleNamespace(
+        pipeline=SimpleNamespace(stop=lambda: None),
+        repo=SimpleNamespace(close=lambda: repo_closed.append(1)),
+        shutdown=threading.Event(),
+        alerts=dispatcher,
+        notifiers=[notifier],
+    )
+    dispatcher.start()
+    try:
+        bus.publish(_truck_new(1))
+        assert _wait_until(lambda: len(notifier.batches) == 1)
+        bus.publish(_truck_new(2))  # held by the 60 s cooldown
+        assert _wait_until(lambda: len(dispatcher._channels[0].pending) == 1)
+        t0 = time.monotonic()
+        app_mod.shutdown_engine(ctx)
+        took = time.monotonic() - t0
+    finally:
+        release.set()
+        dispatcher.stop(timeout=1.0)
+    assert took < 3.5
+    assert repo_closed == [1]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("dropped 1 held alert" in m for m in messages)
+    stuck = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING and "did not finish" in r.getMessage()
+    ]
+    assert len(stuck) == 1 and "mqtt" in stuck[0]
+    assert "engine stopped" in messages
+
+
+def test_interrupt_inside_alerts_shutdown_still_closes_repo():
+    def interrupted(*a, **k) -> None:
+        raise KeyboardInterrupt
+
+    repo_closed: list = []
+    closed: list = []
+    ctx = SimpleNamespace(
+        pipeline=SimpleNamespace(stop=lambda: None),
+        repo=SimpleNamespace(close=lambda: repo_closed.append(1)),
+        shutdown=threading.Event(),
+        alerts=SimpleNamespace(stop=interrupted),
+        notifiers=[SimpleNamespace(name="desktop", close=lambda: closed.append(1))],
+    )
+    app_mod.shutdown_engine(ctx)
+    assert repo_closed == [1]
+    assert closed == [1]  # the other notifiers are still closed
+
+
+def test_interrupt_while_stopping_alerts_still_closes_repo(monkeypatch):
+    def interrupted(ctx) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(app_mod, "_stop_alerts", interrupted)
+    repo_closed: list = []
+    ctx = SimpleNamespace(
+        pipeline=SimpleNamespace(stop=lambda: None),
+        repo=SimpleNamespace(close=lambda: repo_closed.append(1)),
+        shutdown=threading.Event(),
+        alerts=None,
+        notifiers=[],
+    )
+    app_mod.shutdown_engine(ctx)  # a second Ctrl+C there is swallowed, like during the pipeline stop
+    assert repo_closed == [1]
+
+
+def test_failing_alerts_shutdown_still_closes_repo(monkeypatch):
+    def broken(ctx) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(app_mod, "_stop_alerts", broken)
+    repo_closed: list = []
+    ctx = SimpleNamespace(
+        pipeline=SimpleNamespace(stop=lambda: None),
+        repo=SimpleNamespace(close=lambda: repo_closed.append(1)),
+        shutdown=threading.Event(),
+    )
+    with pytest.raises(RuntimeError):
+        app_mod.shutdown_engine(ctx)
+    assert repo_closed == [1]
 
 
 def test_dotenv_inline_comments(tmp_path, monkeypatch):

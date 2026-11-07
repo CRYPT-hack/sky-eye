@@ -9,6 +9,8 @@ from typing import Callable
 from engine.alerts.core import AlertBatch, AlertError
 
 _PUBLISH_TIMEOUT_S = 5.0
+_CLOSE_LOCK_S = 0.5  # close() waits at most this long for a send() in progress
+_CLOSE_JOIN_S = 1.5  # ... and this long for paho's network thread to stop
 
 
 def _default_factory(**kwargs):
@@ -23,6 +25,8 @@ class MqttNotifier:
     Delivery is at-least-once: a batch that fails part-way (or whose ack is lost) may be
     republished by the dispatcher's retry, so subscribers can see a truck twice.
     Nothing is published while the broker is disconnected, so nothing piles up in paho.
+    close() returns within about 2 s, even on a half-open link or with a send() in
+    progress (which then fails); after close() every send() fails.
     """
 
     name = "mqtt"
@@ -44,6 +48,7 @@ class MqttNotifier:
         self._username, self._password, self._tls = username, password, tls
         self._factory = client_factory or _default_factory
         self._client = None
+        self._closed = False
         self._lock = threading.Lock()
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
@@ -56,6 +61,8 @@ class MqttNotifier:
         self._connected.clear()
 
     def _ensure(self):
+        if self._closed:
+            raise AlertError("mqtt notifier is closed")
         if self._client is None:
             from paho.mqtt.enums import CallbackAPIVersion
 
@@ -80,6 +87,8 @@ class MqttNotifier:
         with self._lock:
             client = self._ensure()
             for msg in messages:
+                if self._closed:
+                    raise AlertError("mqtt notifier is closed")
                 if not self._connected.wait(self._connect_timeout):
                     raise AlertError("mqtt broker not connected")
                 try:
@@ -92,13 +101,37 @@ class MqttNotifier:
                     raise AlertError("mqtt publish not acknowledged (broker unreachable?)")
 
     def close(self) -> None:
-        with self._lock:
+        """Disconnect, then stop paho's network thread; idempotent. Does not wait
+        for a send() in progress beyond _CLOSE_LOCK_S, nor for paho beyond
+        _CLOSE_JOIN_S (a thread stuck in a TCP connect finishes on its own)."""
+        locked = self._lock.acquire(timeout=_CLOSE_LOCK_S)
+        try:
             client, self._client = self._client, None
+            self._closed = True
             self._connected.clear()
+        finally:
+            if locked:
+                self._lock.release()
         if client is None:
             return
+        # disconnect first: with loop_stop() first, paho keeps its loop running for as
+        # long as QoS-1 messages are unacknowledged (minutes on a half-open link)
         try:
-            client.loop_stop()
             client.disconnect()
-        except Exception:
+        except Exception:  # noqa: BLE001 - closing anyway
             pass
+        stopper = threading.Thread(
+            target=_quiet(client.loop_stop), name="mqtt-close", daemon=True
+        )
+        stopper.start()
+        stopper.join(_CLOSE_JOIN_S)
+
+
+def _quiet(fn: Callable[[], object]) -> Callable[[], None]:
+    def run() -> None:
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 - closing anyway
+            pass
+
+    return run

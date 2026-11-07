@@ -36,6 +36,10 @@ from engine.tracking import build_tracker
 log = logging.getLogger(__name__)
 
 _STOP_TIMEOUT_S = 5.0
+# After the pipeline stopped: the alert dispatcher and every notifier share this
+# deadline (the dispatcher's workers get at most _DISPATCHER_STOP_S of it).
+_ALERTS_STOP_S = 3.0
+_DISPATCHER_STOP_S = 1.5
 # Backstop: uvicorn cancels responses still open this long after an exit request.
 _GRACEFUL_SHUTDOWN_S = 3
 _INLINE_COMMENT = re.compile(r"\s+#.*$")
@@ -361,30 +365,64 @@ def _stop_pipeline(ctx: EngineContext) -> bool:
     return True
 
 
+def _stop_alerts(ctx: EngineContext) -> None:
+    """Stop the alert dispatcher, then close every notifier, in one helper thread.
+    Gives up after _ALERTS_STOP_S in total and names what did not finish."""
+    steps: list[tuple[str, Callable[[], object]]] = []
+    alerts = getattr(ctx, "alerts", None)
+    if alerts is not None:
+        steps.append(("alert dispatcher", lambda: alerts.stop(timeout=_DISPATCHER_STOP_S)))
+    for notifier in getattr(ctx, "notifiers", ()):
+        close = getattr(notifier, "close", None)
+        if callable(close):
+            steps.append((f"{getattr(notifier, 'name', 'alert')} notifier", close))
+    if not steps:
+        return
+    lock = threading.Lock()
+    unfinished = [name for name, _ in steps]
+
+    def run() -> None:
+        for name, step in steps:
+            try:
+                step()
+            except BaseException as exc:  # noqa: BLE001 - never block the shutdown
+                log.warning("stopping the %s failed: %s", name, type(exc).__name__)
+            with lock:
+                unfinished.remove(name)
+
+    worker = threading.Thread(target=run, name="sky-eye-alerts-stop", daemon=True)
+    worker.start()
+    worker.join(_ALERTS_STOP_S)
+    if worker.is_alive():
+        with lock:
+            left = ", ".join(unfinished)
+        log.warning(
+            "alerts did not finish stopping within %.0f s (%s); exiting anyway",
+            _ALERTS_STOP_S,
+            left,
+        )
+
+
 def shutdown_engine(ctx: EngineContext) -> None:
-    """Stop the pipeline and close the database. If the pipeline does not stop
-    within 5 s, flush the logs and exit the process with code 1."""
+    """Stop the pipeline (at most 5 s), then the alerts (at most 3 s more), and
+    always close the database. If the pipeline does not stop within 5 s, flush the
+    logs and exit the process with code 1 (the pipeline may still use the database)."""
     ctx.shutdown.set()
     try:
         clean = _stop_pipeline(ctx)
     except KeyboardInterrupt:  # another Ctrl+C while waiting: stop waiting
         clean = False
-    if clean:
-        alerts = getattr(ctx, "alerts", None)
-        if alerts is not None:
-            alerts.stop()
-        for notifier in getattr(ctx, "notifiers", ()):
-            close = getattr(notifier, "close", None)
-            if close is not None:
-                try:
-                    close()
-                except Exception as exc:  # noqa: BLE001 - never block the shutdown
-                    log.warning("closing %s failed: %s", notifier.name, type(exc).__name__)
-        ctx.repo.close()
-        log.info("engine stopped")
+    if not clean:
+        logging.shutdown()
+        _hard_exit(1)
         return
-    logging.shutdown()
-    _hard_exit(1)
+    try:
+        _stop_alerts(ctx)
+    except KeyboardInterrupt:  # another Ctrl+C while waiting: stop waiting
+        log.warning("interrupted while stopping the alerts; closing the database")
+    finally:
+        ctx.repo.close()
+    log.info("engine stopped")
 
 
 def main(argv: list[str] | None = None) -> int:

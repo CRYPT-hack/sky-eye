@@ -124,7 +124,10 @@ class AlertDispatcher:
         )
         self._reader.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float = 5.0) -> int:
+        """Stop the reader and the channel workers (waiting at most `timeout` in
+        total). Trucks still held for a cooldown are dropped: returns (and logs)
+        how many."""
         self._stop.set()
         if self._sub is not None:
             self._bus.unsubscribe(self._sub)
@@ -136,6 +139,26 @@ class AlertDispatcher:
             t.join(max(0.0, end - time.monotonic()))
             if t.is_alive():
                 log.warning("alert worker for %s did not stop within timeout (stuck in I/O?)", name)
+        return self._drop_held()
+
+    def _drop_held(self) -> int:
+        """After stop: forget the trucks no channel will send now; log how many."""
+        held: list[str] = []
+        total = 0
+        for ch in self._channels:
+            with ch.inbox.mutex:
+                waiting = sum(1 for item in ch.inbox.queue if item is not _TEST)
+                ch.inbox.queue.clear()
+            count = len(ch.pending) + waiting
+            ch.pending = []
+            if count:
+                held.append(f"{ch.name}: {count}")
+                total += count
+        if total:
+            log.warning(
+                "alerts stopping: dropped %d held alert(s) (%s)", total, ", ".join(held)
+            )
+        return total
 
     def send_test(self) -> None:
         for ch in self._channels:
