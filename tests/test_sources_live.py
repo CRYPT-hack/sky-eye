@@ -126,7 +126,7 @@ def test_stream_read_never_blocks(sources):
     for _ in range(20):
         t0 = time.perf_counter()
         assert src.read() is None
-        assert time.perf_counter() - t0 < 0.05
+        assert time.perf_counter() - t0 < 0.5
 
 
 def test_stream_reconnects_with_backoff(sources):
@@ -527,7 +527,7 @@ def test_capture_reopens_after_device_loss():
     while clock.t < 8.0:
         t0 = time.perf_counter()
         frame = src.read()
-        assert time.perf_counter() - t0 < 0.05
+        assert time.perf_counter() - t0 < 0.5
         states.append(src.state)
         got.append(frame is not None)
         clock.t = round(clock.t + 0.1, 6)

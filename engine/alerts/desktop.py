@@ -28,6 +28,14 @@ def _default_notify(**kwargs) -> None:
 
 
 class DesktopNotifier:
+    """Toast + beep on the machine running the engine.
+
+    On Windows plyer shows the balloon from a thread of its own, so a failure
+    there never reaches send(): it cannot be retried, and plyer prints it to
+    stderr (the console) instead of the engine log. send() only raises for
+    errors before that hand-off (e.g. plyer missing).
+    """
+
     name = "desktop"
 
     def __init__(

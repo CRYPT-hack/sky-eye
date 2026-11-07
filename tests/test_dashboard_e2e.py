@@ -104,8 +104,7 @@ def test_built_site_served_by_live_engine(tmp_path, monkeypatch):
 
         # subscribe before the pipeline starts, so truck.new cannot be missed
         with connect(f"ws://127.0.0.1:{port}/ws", open_timeout=5, close_timeout=5) as ws,                 httpx.Client(base_url=base, timeout=5) as c:
-            ctx.alerts.start()  # what on_started does, before the pipeline
-            ctx.pipeline.start()
+            app_mod.on_started(ctx, f"{base}/")  # what main() runs once listening
             r = c.get("/")
             assert r.status_code == 200
             assert r.headers["content-type"].startswith("text/html")
@@ -186,3 +185,4 @@ def test_built_site_served_by_live_engine(tmp_path, monkeypatch):
         shutdown_engine(ctx)
         assert not thread.is_alive()
         assert time.time() - t0 < 5
+        assert not ctx.alerts._alive()

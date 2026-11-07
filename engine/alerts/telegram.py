@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import logging
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -13,9 +12,19 @@ from engine.alerts.core import AlertBatch, AlertError
 
 __all__ = ["AlertError", "TelegramNotifier"]
 
-log = logging.getLogger("engine.alerts")
-
 _BASE = "https://api.telegram.org"
+
+
+def _plain_relative(rel: str) -> bool:
+    """True for a plain relative path: no drive, UNC share, root, ".." part or NUL.
+    Checked as text before anything touches the disk (resolving a UNC path would
+    reach out to the network share). Both / and \\ count as separators."""
+    if not rel or "\x00" in rel:
+        return False
+    win = PureWindowsPath(rel)
+    if win.drive or win.root or rel.startswith(("/", "\\")):
+        return False
+    return ".." not in win.parts
 
 
 class TelegramNotifier:
@@ -52,7 +61,7 @@ class TelegramNotifier:
         if not isinstance(url, str) or not url.startswith("/media/"):
             return None
         rel = unquote(urlsplit(url).path[len("/media/"):])
-        if not rel:
+        if not _plain_relative(rel):
             return None
         try:
             root = self._media_root.resolve()

@@ -359,6 +359,16 @@ def _fail(message: str) -> int:
     return 2
 
 
+def on_started(ctx: EngineContext, url: str) -> None:
+    """Runs once the HTTP server is listening: the alerts first (so they see every
+    truck.new), then the pipeline, then the dashboard URL."""
+    if ctx.alerts is not None:
+        ctx.alerts.start()
+    ctx.pipeline.start()
+    log.info("listening on %s:%d; dashboard at %s", ctx.api.host, ctx.api.port, url)
+    print(f"Dashboard: {url}", flush=True)
+
+
 def _stop_pipeline(ctx: EngineContext) -> bool:
     """Stop the pipeline in a helper thread; give up after 5 s. True if it stopped."""
     stopper = threading.Thread(target=ctx.pipeline.stop, name="sky-eye-stop", daemon=True)
@@ -457,16 +467,7 @@ def main(argv: list[str] | None = None) -> int:
         return _fail(f"error: {exc}")
 
     url = _dashboard_url(cfg.api.host, cfg.api.port)
-
-    def on_started() -> None:
-        # only once the server is listening: the pipeline, then the URL
-        if ctx.alerts is not None:
-            ctx.alerts.start()
-        ctx.pipeline.start()
-        log.info("listening on %s:%d; dashboard at %s", cfg.api.host, cfg.api.port, url)
-        print(f"Dashboard: {url}", flush=True)
-
-    server = build_server(ctx, on_started)
+    server = build_server(ctx, lambda: on_started(ctx, url))
     try:
         server.run(sockets=[sock])
     except KeyboardInterrupt:

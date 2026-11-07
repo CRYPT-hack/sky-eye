@@ -256,6 +256,11 @@ class EvidenceRecorder:
         self._abort_evt = threading.Event()  # tells a running encode to give up
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="evidence")
 
+    @property
+    def stopping(self) -> bool:
+        """True once abort() was called (the engine is stopping)."""
+        return self._abort_evt.is_set()
+
     def _downscale(self, frame: Frame) -> Frame:
         h, w = frame.image.shape[:2]
         if w <= self._max_width:

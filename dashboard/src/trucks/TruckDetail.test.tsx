@@ -258,6 +258,28 @@ describe("clip_status from the engine", () => {
     }
   });
 
+  test("an unknown future clip status is shown as it is, without a player", async () => {
+    const { view } = start(
+      makeTruck(5, {
+        clip_status: "archived" as never,
+        clip_url: "/media/clip5.mp4",
+        ...OLD,
+      }),
+    );
+    await flush();
+    expect(screen.getByText("Clip status: archived")).toBeInTheDocument();
+    expect(view.container.querySelector("video")).toBeNull();
+  });
+
+  test("a clip_url with a status other than saved shows no player", async () => {
+    const { view } = start(
+      makeTruck(5, { clip_status: "removed", clip_url: "/media/clip5.mp4", ...OLD }),
+    );
+    await flush();
+    expect(screen.getByText("Clip removed to free disk space")).toBeInTheDocument();
+    expect(view.container.querySelector("video")).toBeNull();
+  });
+
   test("saved shows the player", async () => {
     const { view } = start(
       makeTruck(5, { clip_status: "saved", clip_url: "/media/clip5.mp4", ...OLD }),

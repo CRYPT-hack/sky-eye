@@ -215,7 +215,16 @@ class EventManager:
                 self._repo.update_truck(truck_id, clip_status=status)
                 self._publish("truck.updated", truck_id)
             except Exception as exc:  # noqa: BLE001 - shutdown must not fail on this
-                log.debug("could not record clip status %r of truck %d: %r", status, truck_id, exc)
+                # expected while stopping (the repository may be closing); a real
+                # problem otherwise: the truck would stay "pending" until a restart
+                stopping = bool(getattr(self._evidence, "stopping", False))
+                log.log(
+                    logging.DEBUG if stopping else logging.WARNING,
+                    "could not record clip status %r of truck %d: %r",
+                    status,
+                    truck_id,
+                    exc,
+                )
 
         trigger_ts = frame.ts
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import queue
+import sqlite3
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -353,12 +355,46 @@ def test_clip_status_failed_on_abort(tmp_path):
         rig.close()
 
 
-def test_abort_with_closed_repo_is_swallowed(tmp_path):
+def test_abort_with_closed_repo_is_swallowed(tmp_path, caplog):
     rig = Rig(tmp_path)
     rig.feed(0, 0.0, result(0.8))
     rig.repo.close()
-    rig.evidence.abort()  # must not raise into shutdown
+    with caplog.at_level(logging.DEBUG, logger="engine.events.manager"):
+        rig.evidence.abort()  # must not raise into shutdown
     rig.evidence.close()
+    # the engine is stopping: expected, so not a warning
+    assert not [
+        r for r in caplog.records
+        if r.name == "engine.events.manager" and r.levelno >= logging.WARNING
+    ]
+
+
+def test_clip_status_write_failure_while_running_is_a_warning(tmp_path, monkeypatch, caplog):
+    rig = Rig(tmp_path)
+    rig.evidence.close()
+    rig.evidence = rig.mgr._evidence = EvidenceRecorder(
+        tmp_path, before_s=1.0, after_s=1.0, max_jobs=1
+    )
+    real = rig.repo.update_truck
+
+    def flaky(truck_id, **fields):
+        if "clip_status" in fields:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(truck_id, **fields)
+
+    monkeypatch.setattr(rig.repo, "update_truck", flaky)
+    try:
+        with caplog.at_level(logging.DEBUG, logger="engine.events.manager"):
+            rig.feed(0, 0.0, result(0.8, track_id=1))
+            rig.feed(1, 0.1, result(0.8, track_id=2))  # over the cap: "skipped"
+        warns = [
+            r.getMessage() for r in caplog.records
+            if r.name == "engine.events.manager" and r.levelno == logging.WARNING
+        ]
+        assert len(warns) == 1 and "skipped" in warns[0]
+    finally:
+        monkeypatch.setattr(rig.repo, "update_truck", real)
+        rig.close()
 
 
 def test_last_seen_heartbeat(tmp_path):

@@ -63,7 +63,17 @@ function clipNotice(t: Truck, polling: boolean) {
   }
   // "saved" without a clip_url should not happen; skipped, failed and removed explain themselves.
   if (status === "saved") return <p className="muted">No clip saved for this truck</p>;
-  return <p className="muted">{CLIP_MESSAGE[status]}</p>;
+  if (Object.hasOwn(CLIP_MESSAGE, status)) {
+    return <p className="muted">{CLIP_MESSAGE[status as keyof typeof CLIP_MESSAGE]}</p>;
+  }
+  // A status from a newer engine that this site does not know yet.
+  return <p className="muted">{`Clip status: ${String(status)}`}</p>;
+}
+
+/** The player only for a saved clip; engines without clip_status: whenever there is a clip. */
+function playableClip(t: Truck): string | null {
+  if (t.clip_status !== undefined && t.clip_status !== "saved") return null;
+  return t.clip_url;
 }
 
 export default function TruckDetail({ id }: { id: number }) {
@@ -154,6 +164,7 @@ export default function TruckDetail({ id }: { id: number }) {
   }
 
   const t = state.truck;
+  const clip = playableClip(t);
   return (
     <div className="stack">
       {back}
@@ -175,13 +186,13 @@ export default function TruckDetail({ id }: { id: number }) {
           <p>No full frame saved</p>
         </div>
       )}
-      {t.clip_url ? (
+      {clip ? (
         <video
           className="detail-media"
           controls
           playsInline
           preload="metadata"
-          src={client.mediaUrl(t.clip_url)}
+          src={client.mediaUrl(clip)}
         />
       ) : (
         clipNotice(t, state.clipPending)

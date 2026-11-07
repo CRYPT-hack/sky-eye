@@ -119,6 +119,18 @@ def test_ignores_other_event_types(running, clock):
     assert wait_until(lambda: ids(n) == [[2]])
 
 
+def test_reader_survives_a_bad_message(running, clock, caplog):
+    caplog.set_level(logging.ERROR)
+    n = Fake("desktop")
+    bus, d = running([n], clock=clock)
+    bus.publish("not a dict SECRET")  # type: ignore[arg-type]
+    bus.publish(["truck.new", {"token": "SECRET"}])  # type: ignore[arg-type]
+    bus.publish(new(1))
+    assert wait_until(lambda: ids(n) == [[1]])
+    assert d._reader is not None and d._reader.is_alive()
+    assert "AttributeError" in caplog.text and "SECRET" not in caplog.text
+
+
 def test_burst_is_grouped_per_cooldown(running, clock):
     n = Fake("desktop")
     bus, d = running([n], clock=clock)
@@ -230,7 +242,7 @@ def test_failing_channel_never_blocks_publish(running, clock):
         t0 = time.monotonic()
         for i in range(50):
             bus.publish(new(i))
-        assert time.monotonic() - t0 < 0.05
+        assert time.monotonic() - t0 < 0.5  # the notifier blocks for 10 s
     finally:
         gate.set()
 

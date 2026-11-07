@@ -185,25 +185,35 @@ class AlertDispatcher:
         unreported = 0
         last_warn: float | None = None
         while not stop.is_set():
-            dropped = sub.dropped
-            unreported += dropped - last_seen
-            last_seen = dropped
-            if unreported and (last_warn is None or self._clock() - last_warn >= _DROP_WARN_S):
-                log.warning("alert subscription full; %d events dropped", unreported)
-                unreported = 0
-                last_warn = self._clock()
             try:
-                msg = sub.get(timeout=_POLL_S)
-            except queue.Empty:
-                continue
-            if msg.get("type") != "truck.new":
-                continue
-            t = msg.get("truck")
-            if not isinstance(t, dict):
-                continue
-            stamp = self._clock()
-            for ch in self._channels:
-                ch.offer((stamp, t))
+                dropped = sub.dropped
+                unreported += dropped - last_seen
+                last_seen = dropped
+                if unreported and (
+                    last_warn is None or self._clock() - last_warn >= _DROP_WARN_S
+                ):
+                    log.warning("alert subscription full; %d events dropped", unreported)
+                    unreported = 0
+                    last_warn = self._clock()
+                try:
+                    msg = sub.get(timeout=_POLL_S)
+                except queue.Empty:
+                    continue
+                self._route(msg)
+            except Exception as exc:  # never let the reader die; type only, no data
+                log.error("alert reader error (message skipped): %s", type(exc).__name__)
+                stop.wait(_POLL_S)
+
+    def _route(self, msg: dict) -> None:
+        """Reader thread: hand a truck.new to every channel, stamped on arrival."""
+        if msg.get("type") != "truck.new":
+            return
+        t = msg.get("truck")
+        if not isinstance(t, dict):
+            return
+        stamp = self._clock()
+        for ch in self._channels:
+            ch.offer((stamp, t))
 
     def _run_channel(self, ch: _Channel, stop: threading.Event) -> None:
         while not stop.is_set():

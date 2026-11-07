@@ -122,6 +122,47 @@ def test_telegram_path_traversal_falls_back(tmp_path):
     assert len(seen) == 2 and all(r.url.path.endswith("/sendMessage") for r in seen)
 
 
+@pytest.mark.parametrize(
+    "crop",
+    [
+        "/media//etc/passwd",
+        "/media/%2Fetc%2Fpasswd",
+        "/media/C:/Windows/win.ini",
+        "/media/C:secret.jpg",
+        "/media/%5C%5Cserver%5Cshare%5Cx.jpg",
+        "/media///server/share/x.jpg",
+        "/media/%5Croot.jpg",
+        "/media/2026-11-06/..%5C..%5Csecret.jpg",
+        "/media/a/../../secret.jpg",
+        "/media/a/..",
+    ],
+)
+def test_telegram_crop_path_checked_before_touching_the_disk(tmp_path, monkeypatch, crop):
+    from pathlib import Path
+
+    resolved: list[str] = []
+    real = Path.resolve
+
+    def spy(self, *a, **k):
+        resolved.append(str(self))
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "resolve", spy)
+    seen, handler = recorder()
+    make_tg(tmp_path, handler).send(AlertBatch((truck(crop=crop),)))
+    assert seen[0].url.path.endswith("/sendMessage")
+    assert resolved == []  # rejected lexically: no UNC/drive lookup, no resolve()
+
+
+def test_telegram_nested_crop_path_still_sent(tmp_path):
+    d = tmp_path / "2026-11-06" / "sub"
+    d.mkdir(parents=True)
+    (d / "x_crop.jpg").write_bytes(b"\xff\xd8JPEG")
+    seen, handler = recorder()
+    make_tg(tmp_path, handler).send(AlertBatch((truck(crop="/media/2026-11-06/sub/x_crop.jpg?v=1"),)))
+    assert seen[0].url.path.endswith("/sendPhoto")
+
+
 def test_telegram_nul_in_crop_url_falls_back(tmp_path):
     seen, handler = recorder()
     make_tg(tmp_path, handler).send(AlertBatch((truck(crop="/media/a%00b.jpg"),)))
