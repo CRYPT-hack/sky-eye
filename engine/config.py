@@ -7,8 +7,10 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_core import InitErrorDetails, PydanticCustomError
+
+from engine.telemetry.connection import validate_connection
 
 
 class ConfigError(Exception):
@@ -163,6 +165,17 @@ class ApiConfig(_Model):
     stream_fps: int = Field(default=15, ge=1)
     stream_max_width: int = Field(default=1280, ge=16)
     dashboard_dir: Path | None = None  # None = <repo>/dashboard/dist
+    map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+
+    @field_validator("map_tile_url")
+    @classmethod
+    def _check_tile_url(cls, url: str) -> str:
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("map_tile_url must start with http:// or https://")
+        missing = [t for t in ("{z}", "{x}", "{y}") if t not in url]
+        if missing:
+            raise ValueError(f"map_tile_url must contain {', '.join(missing)}")
+        return url
 
 
 class TelegramConfig(_Model):
@@ -207,6 +220,34 @@ class AlertsConfig(_Model):
         ]
 
 
+class TelemetryConfig(_Model):
+    type: Literal["none", "mavlink", "dji_srt"] = "none"
+    connection: str = "udpin:0.0.0.0:14550"  # type: mavlink
+    srt_path: Path | None = None  # type: dji_srt; default = the video's sibling .SRT
+    max_age_s: float = Field(default=0.5, gt=0)
+    stale_after_s: float = Field(default=2.0, gt=0)
+
+    @field_validator("connection")
+    @classmethod
+    def _udp_or_serial(cls, v: str) -> str:
+        return validate_connection(v)
+
+
+class CameraConfig(_Model):
+    hfov_deg: float = Field(default=82.0, ge=10, le=170)
+
+
+def _sibling_srt(video: Path) -> Path | None:
+    """A file next to `video` with the same stem and a .srt suffix in any case."""
+    try:
+        for p in video.parent.iterdir():
+            if p.stem == video.stem and p.suffix.lower() == ".srt" and p.is_file():
+                return p
+    except OSError:
+        pass
+    return None
+
+
 class AppConfig(_Model):
     source: SourceConfig = Field(default_factory=SourceConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
@@ -214,10 +255,30 @@ class AppConfig(_Model):
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    camera: CameraConfig = Field(default_factory=CameraConfig)
+
+    @model_validator(mode="after")
+    def _check_telemetry(self) -> AppConfig:
+        tel = self.telemetry
+        if tel.type != "dji_srt":
+            return self
+        if self.source.type != "file":
+            raise ValueError("telemetry.type dji_srt requires source.type: file")
+        if tel.srt_path is None:
+            found = _sibling_srt(self.source.path) if self.source.path else None
+            if found is None:
+                raise ValueError(
+                    "telemetry.srt_path is required: no .SRT file next to the source video"
+                )
+            tel.srt_path = found
+        elif not tel.srt_path.is_file():
+            raise ValueError(f"telemetry.srt_path does not exist: {tel.srt_path}")
+        return self
 
 
 _PATH_FIELDS = (("source", "path"), ("detector", "weights"), ("evidence", "data_dir"),
-                ("api", "dashboard_dir"))
+                ("api", "dashboard_dir"), ("telemetry", "srt_path"))
 
 
 def _resolve_paths(raw: dict[str, Any], base: Path) -> None:

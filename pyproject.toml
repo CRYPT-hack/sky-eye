@@ -20,6 +20,8 @@ dependencies = [
     "httpx~=0.28",
     "plyer~=2.1",
     "paho-mqtt~=2.2",
+    "pymavlink~=2.4",
+    "pyserial~=3.5",
 ]
 
 [dependency-groups]
