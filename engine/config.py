@@ -10,6 +10,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
+from engine.telemetry.connection import validate_connection
+
 
 class ConfigError(Exception):
     """Raised when the config file is missing or invalid."""
@@ -224,6 +226,11 @@ class TelemetryConfig(_Model):
     srt_path: Path | None = None  # type: dji_srt; default = the video's sibling .SRT
     max_age_s: float = Field(default=0.5, gt=0)
     stale_after_s: float = Field(default=2.0, gt=0)
+
+    @field_validator("connection")
+    @classmethod
+    def _udp_or_serial(cls, v: str) -> str:
+        return validate_connection(v)
 
 
 class CameraConfig(_Model):

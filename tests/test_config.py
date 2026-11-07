@@ -365,3 +365,16 @@ def test_dji_srt_explicit_missing_rejected(tmp_path):
 def test_srt_path_ignored_for_other_types(tmp_path):
     cfg = load_config(_write(tmp_path, "telemetry:\n  type: mavlink\n  srt_path: nope.srt\n"))
     assert cfg.telemetry.type == "mavlink"
+
+
+@pytest.mark.parametrize("conn", ["tcp:127.0.0.1:5760", "tcpin:0.0.0.0:5760", "ws://x:1", ""])
+def test_telemetry_connection_rejects_non_udp_serial(tmp_path, conn):
+    p = _write(tmp_path, f"telemetry:\n  type: mavlink\n  connection: '{conn}'\n")
+    with pytest.raises(ConfigError, match=r"telemetry\.connection.*UDP"):
+        load_config(p)
+
+
+@pytest.mark.parametrize("conn", ["udpin:0.0.0.0:14550", "COM5,57600", "/dev/ttyACM0"])
+def test_telemetry_connection_accepts_udp_serial(tmp_path, conn):
+    p = _write(tmp_path, f"telemetry:\n  type: mavlink\n  connection: '{conn}'\n")
+    assert load_config(p).telemetry.connection == conn
