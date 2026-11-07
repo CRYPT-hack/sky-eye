@@ -471,3 +471,115 @@ def test_stream_credentials_not_stored_or_served(tmp_path, monkeypatch, source_y
     for s in secret:
         assert s not in config_json and s not in body and s not in label
     assert name in body
+
+
+class _FakeNotifier:
+    def __init__(self, name):
+        self.name = name
+        self.closed = 0
+
+    def send(self, batch):
+        pass
+
+    def close(self):
+        self.closed += 1
+
+
+def test_build_engine_starts_and_stops_dispatcher(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok-secret-1")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat-secret-2")
+    monkeypatch.setenv("MQTT_PASSWORD", "pw-secret-3")
+    built: dict = {}
+
+    def fake_telegram(token, chat_id, media_root, dashboard_url=None, **k):
+        built["telegram"] = (token, chat_id, Path(media_root), dashboard_url)
+        return _FakeNotifier("telegram")
+
+    def fake_mqtt(host, port, topic, username, password, tls, **k):
+        built["mqtt"] = (host, port, topic, username, password, tls)
+        built["mqtt_obj"] = _FakeNotifier("mqtt")
+        return built["mqtt_obj"]
+
+    monkeypatch.setattr(app_mod, "TelegramNotifier", fake_telegram)
+    monkeypatch.setattr(app_mod, "MqttNotifier", fake_mqtt)
+    monkeypatch.setattr(app_mod, "DesktopNotifier", lambda: _FakeNotifier("desktop"))
+    video = make_video(tmp_path / "v.mp4", 5)
+    extra = (
+        "alerts:\n  cooldown_s: 3\n  telegram:\n    enabled: true\n"
+        "    dashboard_url: http://box:8000\n"
+        "  mqtt:\n    enabled: true\n    host: broker\n    username: bob\n"
+    )
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}", extra=extra))
+    ctx = build_engine(cfg)
+    try:
+        assert ctx.info["alerts"] == ["desktop", "telegram", "mqtt"]
+        assert ctx.runtime.alerts == {"desktop": True, "telegram": True, "mqtt": True}
+        assert built["telegram"] == (
+            "tok-secret-1", "chat-secret-2", cfg.evidence.data_dir / "media", "http://box:8000")
+        assert built["mqtt"] == ("broker", 1883, "sky-eye/events", "bob", "pw-secret-3", False)
+        assert ctx.alerts is not None
+        assert not ctx.alerts._alive()  # built, not started
+        ctx.alerts.start()
+        assert ctx.alerts._alive()
+    finally:
+        app_mod.shutdown_engine(ctx)
+    assert not ctx.alerts._alive()
+    assert built["mqtt_obj"].closed == 1
+
+
+def test_mqtt_password_ignored_without_username(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    monkeypatch.setenv("MQTT_PASSWORD", "pw-secret-3")
+    seen: dict = {}
+
+    def fake_mqtt(host, port, topic, username, password, tls, **k):
+        seen["password"] = password
+        return _FakeNotifier("mqtt")
+
+    monkeypatch.setattr(app_mod, "MqttNotifier", fake_mqtt)
+    video = make_video(tmp_path / "v.mp4", 5)
+    extra = "alerts:\n  desktop: false\n  mqtt:\n    enabled: true\n"
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}", extra=extra))
+    ctx = build_engine(cfg)
+    try:
+        assert seen["password"] is None
+        assert ctx.runtime.alerts == {"mqtt": True}
+    finally:
+        app_mod.shutdown_engine(ctx)
+
+
+def test_info_never_contains_secrets(tmp_path, monkeypatch):
+    import sqlite3
+
+    from fastapi.testclient import TestClient
+
+    from engine.api.app import create_app
+
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    secrets = {"TELEGRAM_BOT_TOKEN": "tok-secret-1", "TELEGRAM_CHAT_ID": "chat-secret-2",
+               "MQTT_PASSWORD": "pw-secret-3"}
+    for k, v in secrets.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(app_mod, "TelegramNotifier", lambda *a, **k: _FakeNotifier("telegram"))
+    monkeypatch.setattr(app_mod, "MqttNotifier", lambda *a, **k: _FakeNotifier("mqtt"))
+    video = make_video(tmp_path / "v.mp4", 5)
+    extra = ("alerts:\n  telegram:\n    enabled: true\n"
+             "  mqtt:\n    enabled: true\n    username: bob\n")
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}", extra=extra))
+    ctx = build_engine(cfg)
+    try:
+        with TestClient(create_app(ctx)) as client:
+            bodies = [client.get("/api/info").text, client.get("/api/config/runtime").text]
+        db = sqlite3.connect(cfg.evidence.data_dir / "sky-eye.db")
+        try:
+            rows = db.execute("SELECT config_json FROM runs").fetchall()
+        finally:
+            db.close()
+        assert rows
+        bodies += [r[0] for r in rows]
+        for body in bodies:
+            for value in secrets.values():
+                assert value not in body
+    finally:
+        app_mod.shutdown_engine(ctx)

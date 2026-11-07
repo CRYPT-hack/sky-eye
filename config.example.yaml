@@ -27,6 +27,22 @@ evidence:
   snapshot_window_s: 2
   max_disk_gb: 20
 
+alerts:
+  cooldown_s: 10        # trucks seen within this many seconds of the last alert are batched
+  desktop: true         # Windows toast + beep on the machine running the engine
+  # Telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env
+  # telegram:
+  #   enabled: true
+  #   dashboard_url: http://192.168.1.10:8000
+  # MQTT password (optional, used only with a username) is MQTT_PASSWORD in .env
+  # mqtt:
+  #   enabled: true
+  #   host: 127.0.0.1
+  #   port: 1883
+  #   topic: sky-eye/events
+  #   username: null
+  #   tls: false
+
 api:
   host: 0.0.0.0
   port: 8000

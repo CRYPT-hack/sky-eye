@@ -21,6 +21,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.websockets import WebSocketDisconnect
 
 from engine.api.auth import TokenAuthMiddleware
+from engine.alerts.core import AlertDispatcher
 from engine.config import ApiConfig
 from engine.events.bus import EventBus
 from engine.events.manager import _iso, truck_to_json
@@ -61,6 +62,8 @@ class EngineContext:
     token: str | None = None
     info: dict[str, Any] = field(default_factory=dict)  # served by GET /api/info
     dashboard_dir: Path | None = None  # built website; None = nothing to serve
+    alerts: AlertDispatcher | None = None  # None = no alert channels
+    notifiers: list[Any] = field(default_factory=list)  # closed on shutdown
     # Set when the engine is shutting down (Ctrl+C): long-lived responses
     # (MJPEG stream, WebSocket) end so the HTTP server can stop.
     shutdown: threading.Event = field(default_factory=threading.Event)
@@ -174,8 +177,16 @@ def create_app(ctx: EngineContext) -> FastAPI:
             body = None
         if not isinstance(body, dict):
             return JSONResponse({"api": API_VERSION, "error": "expected a JSON object"}, 422)
+        merged = {**ctx.runtime.model_dump(), **body}
+        if "alerts" in body and isinstance(body["alerts"], dict):
+            unknown = next((k for k in body["alerts"] if k not in ctx.runtime.alerts), None)
+            if unknown is not None:
+                return JSONResponse(
+                    {"api": API_VERSION, "error": f"unknown alert channel: {unknown}"}, 422
+                )
+            merged["alerts"] = {**ctx.runtime.alerts, **body["alerts"]}
         try:
-            candidate = RuntimeSettings.model_validate({**ctx.runtime.model_dump(), **body})
+            candidate = RuntimeSettings.model_validate(merged)
         except ValidationError as exc:
             return JSONResponse(
                 {"api": API_VERSION, "error": "invalid runtime settings",
@@ -185,6 +196,19 @@ def create_app(ctx: EngineContext) -> FastAPI:
         for name in RuntimeSettings.model_fields:
             setattr(ctx.runtime, name, getattr(candidate, name))  # mutate the shared instance
         return _runtime_json(ctx.runtime)
+
+    @app.post("/api/alerts/test")
+    async def alerts_test(request: Request) -> Any:
+        media_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+        if media_type != "application/json":
+            return JSONResponse({"api": API_VERSION, "error": "expected application/json"}, 415)
+        if ctx.alerts is None or not ctx.runtime.alerts:
+            return JSONResponse(
+                {"api": API_VERSION, "error": "no alert channels configured"}, 409
+            )
+        sent = [name for name, on in ctx.runtime.alerts.items() if on]
+        ctx.alerts.send_test()
+        return {"api": API_VERSION, "sent": sent}
 
     @app.get("/stream.mjpg")
     async def stream(request: Request) -> StreamingResponse:

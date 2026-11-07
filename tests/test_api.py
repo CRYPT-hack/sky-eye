@@ -246,7 +246,7 @@ def test_media_path_traversal_blocked(client):
 def test_runtime_put_and_get(client, rig):
     assert client.get("/api/config/runtime").json() == {
         "api": 1,
-        "runtime": {"confidence": 0.4, "sahi_enabled": False},
+        "runtime": {"confidence": 0.4, "sahi_enabled": False, "alerts": {}},
     }
     r = client.put("/api/config/runtime", json={"confidence": 0.6})
     assert r.status_code == 200
@@ -537,3 +537,72 @@ def test_ws_unauthorized_close_code_seen_by_client(tmp_path, monkeypatch):
                 assert json.loads(ws.recv(timeout=5))["type"] == "status"
     finally:
         rig.repo.close()
+
+
+class FakeAlerts:
+    def __init__(self):
+        self.tests = 0
+
+    def send_test(self):
+        self.tests += 1
+
+
+def test_runtime_alert_toggles(rig):
+    rig.ctx.runtime.alerts = {"desktop": True, "telegram": True}
+    with TestClient(create_app(rig.ctx)) as client:
+        assert client.get("/api/config/runtime").json()["runtime"]["alerts"] == {
+            "desktop": True, "telegram": True}
+        r = client.put("/api/config/runtime", json={"alerts": {"desktop": False}})
+        assert r.status_code == 200
+        assert r.json()["runtime"]["alerts"] == {"desktop": False, "telegram": True}
+        assert rig.ctx.runtime.alerts == {"desktop": False, "telegram": True}
+        r = client.put("/api/config/runtime", json={"alerts": {"sms": True}})
+        assert r.status_code == 422
+        assert r.json() == {"api": 1, "error": "unknown alert channel: sms"}
+        assert rig.ctx.runtime.alerts == {"desktop": False, "telegram": True}
+        assert client.put("/api/config/runtime", json={"alerts": [1]}).status_code == 422
+        assert client.put(
+            "/api/config/runtime", json={"alerts": {"desktop": "x"}}).status_code == 422
+        # an unrelated PUT keeps the toggles
+        client.put("/api/config/runtime", json={"confidence": 0.5})
+        assert rig.ctx.runtime.alerts == {"desktop": False, "telegram": True}
+
+
+def test_alert_test_endpoint(rig):
+    fake = FakeAlerts()
+    rig.ctx.alerts = fake  # type: ignore[assignment]
+    rig.ctx.runtime.alerts = {"desktop": True, "telegram": False, "mqtt": True}
+    with TestClient(create_app(rig.ctx)) as client:
+        r = client.post("/api/alerts/test", json={})
+        assert r.status_code == 200
+        assert r.json() == {"api": 1, "sent": ["desktop", "mqtt"]}
+        assert fake.tests == 1
+        r = client.post("/api/alerts/test", content="{}", headers={"Content-Type": "text/plain"})
+        assert r.status_code == 415 and r.json()["api"] == 1
+        assert fake.tests == 1
+
+
+def test_alert_test_endpoint_no_channels(rig):
+    with TestClient(create_app(rig.ctx)) as client:  # no dispatcher
+        r = client.post("/api/alerts/test", json={})
+        assert r.status_code == 409
+        assert r.json() == {"api": 1, "error": "no alert channels configured"}
+    rig.ctx.alerts = FakeAlerts()  # type: ignore[assignment]
+    with TestClient(create_app(rig.ctx)) as client:  # dispatcher but no channels
+        assert client.post("/api/alerts/test", json={}).status_code == 409
+
+
+def test_alert_test_requires_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKYEYE_API_TOKEN", "s3cret")
+    r = make_rig(tmp_path / "d2", mode="token", token="s3cret")
+    r.ctx.alerts = FakeAlerts()  # type: ignore[assignment]
+    r.ctx.runtime.alerts = {"desktop": True}
+    try:
+        with TestClient(create_app(r.ctx)) as client:
+            assert client.post("/api/alerts/test", json={}).status_code == 401
+            ok = client.post(
+                "/api/alerts/test", json={}, headers={"X-SkyEye-Token": "s3cret"}
+            )
+            assert ok.status_code == 200
+    finally:
+        r.repo.close()

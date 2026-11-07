@@ -17,6 +17,10 @@ from types import FrameType
 import uvicorn
 
 from engine.api.app import VERSION, EngineContext, create_app
+from engine.alerts.core import AlertDispatcher, Notifier
+from engine.alerts.desktop import DesktopNotifier
+from engine.alerts.mqtt import MqttNotifier
+from engine.alerts.telegram import TelegramNotifier
 from engine.config import AppConfig, ConfigError, SourceConfig, load_config
 from engine.detectors.rfdetr import DetectorError, build_detector
 from engine.events.bus import EventBus
@@ -138,7 +142,39 @@ def _engine_info(cfg: AppConfig, source_fps: float) -> dict[str, Any]:
             "classes": list(cfg.detector.classes),
         },
         "auth": cfg.api.auth.mode,
+        "alerts": cfg.alerts.channels(),
     }
+
+
+def _build_notifiers(cfg: AppConfig, data_dir: Path) -> list[Notifier]:
+    """Notifiers for the configured channels, in the order desktop, telegram, mqtt.
+    The secrets are read from the environment here and nowhere else."""
+    alerts = cfg.alerts
+    notifiers: list[Notifier] = []
+    if alerts.desktop:
+        notifiers.append(DesktopNotifier())
+    if alerts.telegram.enabled:
+        notifiers.append(
+            TelegramNotifier(
+                os.environ["TELEGRAM_BOT_TOKEN"],
+                os.environ["TELEGRAM_CHAT_ID"],
+                media_dir(data_dir),
+                alerts.telegram.dashboard_url,
+            )
+        )
+    if alerts.mqtt.enabled:
+        m = alerts.mqtt
+        notifiers.append(
+            MqttNotifier(
+                m.host,
+                m.port,
+                m.topic,
+                m.username,
+                os.environ.get("MQTT_PASSWORD") if m.username else None,
+                m.tls,
+            )
+        )
+    return notifiers
 
 
 def build_engine(cfg: AppConfig) -> EngineContext:
@@ -192,7 +228,10 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             cfg.evidence.snapshot_window_s,
             int(cfg.evidence.max_disk_gb * 1024**3),
         )
-        runtime = RuntimeSettings(confidence=cfg.detector.confidence)
+        runtime = RuntimeSettings(
+            confidence=cfg.detector.confidence,
+            alerts={name: True for name in cfg.alerts.channels()},
+        )
         pipeline = Pipeline(
             source,
             detector,
@@ -202,6 +241,13 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             runtime,
             realtime=cfg.source.realtime,
             stream_max_width=cfg.api.stream_max_width,
+        )
+        notifiers = _build_notifiers(cfg, data_dir)
+        dispatcher = AlertDispatcher(
+            bus,
+            notifiers,
+            enabled=lambda name: runtime.alerts.get(name, False),
+            cooldown_s=cfg.alerts.cooldown_s,
         )
     except BaseException:
         try:
@@ -220,6 +266,8 @@ def build_engine(cfg: AppConfig) -> EngineContext:
         token=os.environ.get("SKYEYE_API_TOKEN"),
         info=_engine_info(cfg, source.fps),
         dashboard_dir=cfg.api.dashboard_dir or _default_dashboard_dir(),
+        alerts=dispatcher if notifiers else None,
+        notifiers=notifiers,
     )
 
 
@@ -322,6 +370,16 @@ def shutdown_engine(ctx: EngineContext) -> None:
     except KeyboardInterrupt:  # another Ctrl+C while waiting: stop waiting
         clean = False
     if clean:
+        alerts = getattr(ctx, "alerts", None)
+        if alerts is not None:
+            alerts.stop()
+        for notifier in getattr(ctx, "notifiers", ()):
+            close = getattr(notifier, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception as exc:  # noqa: BLE001 - never block the shutdown
+                    log.warning("closing %s failed: %s", notifier.name, type(exc).__name__)
         ctx.repo.close()
         log.info("engine stopped")
         return
@@ -359,6 +417,8 @@ def main(argv: list[str] | None = None) -> int:
 
     def on_started() -> None:
         # only once the server is listening: the pipeline, then the URL
+        if ctx.alerts is not None:
+            ctx.alerts.start()
         ctx.pipeline.start()
         log.info("listening on %s:%d; dashboard at %s", cfg.api.host, cfg.api.port, url)
         print(f"Dashboard: {url}", flush=True)

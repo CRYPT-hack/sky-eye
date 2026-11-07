@@ -45,6 +45,9 @@ class RuntimeSettings(BaseModel):
 
     confidence: float = Field(default=0.4, gt=0, lt=1)
     sahi_enabled: bool = False  # stored only; used in Plan 6
+    # alert channel on/off switches; the keys are the configured channels, fixed
+    # at build time (the API may only toggle them)
+    alerts: dict[str, bool] = Field(default_factory=dict)
 
 
 class _FrameChannel:
