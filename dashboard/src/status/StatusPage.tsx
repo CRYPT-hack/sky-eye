@@ -3,7 +3,7 @@ import { ApiError } from "../api/client";
 import type { Info, Status } from "../api/types";
 import { useApi } from "../apiContext";
 import Banner from "../components/Banner";
-import { formatDuration, formatFps, formatScore, formatSourceState } from "../format";
+import { formatAlertChannel, formatDuration, formatFps, formatScore, formatSourceState } from "../format";
 
 const POLL_MS = 2000;
 const SAVE_DEBOUNCE_MS = 400;
@@ -46,6 +46,14 @@ export default function StatusPage() {
   const saveSeq = useRef(0);
   const sliderId = useId();
 
+  const [alerts, setAlerts] = useState<Record<string, boolean>>({});
+  const [alertError, setAlertError] = useState<string | null>(null);
+  const serverAlerts = useRef<Record<string, boolean>>({});
+  const alertSeq = useRef<Record<string, number>>({});
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const testSeq = useRef(0);
+
   const fail = useCallback(
     (e: unknown): string | null => {
       if (e instanceof ApiError && e.status === 401) {
@@ -79,6 +87,8 @@ export default function StatusPage() {
           setInfo(i);
           serverConfidence.current = r.confidence;
           setConfidence(r.confidence);
+          serverAlerts.current = { ...r.alerts };
+          setAlerts({ ...r.alerts });
           setInfoError(null);
         })
         .catch((e: unknown) => {
@@ -132,9 +142,58 @@ export default function StatusPage() {
       clearTimeout(saveTimer.current);
       clearTimeout(savedTimer.current);
       saveSeq.current += 1;
+      testSeq.current += 1;
+      for (const k of Object.keys(alertSeq.current)) alertSeq.current[k] += 1;
     },
     [],
   );
+
+  // Each channel is saved on its own, by name only, so switches never overwrite each other;
+  // a response only counts for the latest toggle of its own channel.
+  function onToggle(name: string, value: boolean) {
+    const seq = (alertSeq.current[name] = (alertSeq.current[name] ?? 0) + 1);
+    setAlerts((a) => ({ ...a, [name]: value }));
+    setAlertError(null);
+    client
+      .putRuntime({ alerts: { [name]: value } })
+      .then((r) => {
+        const confirmed = r.alerts?.[name] ?? value;
+        serverAlerts.current[name] = confirmed;
+        if (seq !== alertSeq.current[name]) return;
+        setAlerts((a) => ({ ...a, [name]: confirmed }));
+      })
+      .catch((e: unknown) => {
+        if (seq !== alertSeq.current[name]) return;
+        setAlerts((a) => ({ ...a, [name]: serverAlerts.current[name] ?? !value }));
+        setAlertError(fail(e));
+      });
+  }
+
+  function onTestAlert() {
+    const seq = ++testSeq.current;
+    setTesting(true);
+    setTestResult(null);
+    client
+      .sendTestAlert()
+      .then((sent) => {
+        if (seq !== testSeq.current) return;
+        setTestResult({
+          ok: true,
+          text:
+            sent.length > 0
+              ? `Sent to: ${sent.map(formatAlertChannel).join(", ")}`
+              : "No channel is switched on",
+        });
+      })
+      .catch((e: unknown) => {
+        if (seq !== testSeq.current) return;
+        const text = fail(e);
+        if (text !== null) setTestResult({ ok: false, text });
+      })
+      .finally(() => {
+        if (seq === testSeq.current) setTesting(false);
+      });
+  }
 
   function onSlide(value: number) {
     // Any response to an earlier choice is now stale.
@@ -235,6 +294,41 @@ export default function StatusPage() {
         </div>
         {saveError && <Banner tone="error">{saveError}</Banner>}
       </section>
+
+      {info?.alerts && info.alerts.length > 0 && (
+        <section className="section" aria-labelledby="status-alerts">
+          <h2 className="section-title" id="status-alerts">
+            Alerts
+          </h2>
+          <div className="stack">
+            {info.alerts.map((name) => (
+              <label key={name} className="switch">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={alerts[name] ?? false}
+                  onChange={(e) => onToggle(name, e.target.checked)}
+                />
+                <span>{formatAlertChannel(name)}</span>
+              </label>
+            ))}
+            {alertError && <Banner tone="error">{alertError}</Banner>}
+            <div>
+              <button type="button" className="button" disabled={testing} onClick={onTestAlert}>
+                Send test alert
+              </button>
+            </div>
+            {testResult &&
+              (testResult.ok ? (
+                <p className="muted" role="status">
+                  {testResult.text}
+                </p>
+              ) : (
+                <Banner tone="error">{testResult.text}</Banner>
+              ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

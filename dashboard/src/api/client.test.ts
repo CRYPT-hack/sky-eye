@@ -103,3 +103,26 @@ test("liveUrl uses wss on https", () => {
     "ws://h:1/ws",
   );
 });
+
+test("sendTestAlert POSTs JSON {} and returns the channels", async () => {
+  const f = vi.fn(async () => json({ api: 1, sent: ["desktop", "telegram"] }));
+  const sent = await mk("t", f).sendTestAlert();
+  expect(sent).toEqual(["desktop", "telegram"]);
+  const [url, init] = f.mock.calls[0] as unknown as Call;
+  expect(url).toBe("/api/alerts/test");
+  expect(init?.method).toBe("POST");
+  const h = new Headers(init?.headers);
+  expect(h.get("Content-Type")).toBe("application/json");
+  expect(h.get("X-SkyEye-Token")).toBe("t");
+  expect(init?.body).toBe("{}");
+});
+
+test("sendTestAlert surfaces the API error", async () => {
+  const f = vi.fn(async () =>
+    json({ api: 1, error: "no alert channels configured" }, 409, "Conflict"),
+  );
+  await expect(mk("t", f).sendTestAlert()).rejects.toMatchObject({
+    status: 409,
+    message: "no alert channels configured",
+  });
+});

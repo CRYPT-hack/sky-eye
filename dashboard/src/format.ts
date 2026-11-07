@@ -29,6 +29,7 @@ export function formatDuration(fromIso: string, toIso: string): string {
 export const SOURCE_LABEL: Readonly<Record<SourceState, string>> = {
   starting: "Starting",
   running: "Running",
+  reconnecting: "Reconnecting",
   ended: "Ended",
   error: "Error",
 };
@@ -46,4 +47,15 @@ export function formatFps(fps: number): string {
 /** `0.87` -> `87%`. */
 export function formatScore(score: number): string {
   return `${Math.round(score * 100)}%`;
+}
+
+const ALERT_LABEL: Readonly<Record<string, string>> = {
+  desktop: "Laptop",
+  telegram: "Telegram",
+  mqtt: "MQTT",
+};
+
+/** Display name of an alert channel; a channel this site does not know is shown as sent. */
+export function formatAlertChannel(name: string): string {
+  return Object.hasOwn(ALERT_LABEL, name) ? ALERT_LABEL[name] : name;
 }

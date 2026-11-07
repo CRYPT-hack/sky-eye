@@ -38,3 +38,8 @@ test("formatSourceState labels known states and passes unknown ones through", ()
 test("formatScore", () => {
   expect(formatScore(0.87)).toBe("87%");
 });
+
+test("reconnecting source state has a label", async () => {
+  const { formatSourceState } = await import("./format");
+  expect(formatSourceState("reconnecting")).toBe("Reconnecting");
+});

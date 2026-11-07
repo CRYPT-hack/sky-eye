@@ -84,6 +84,20 @@ test("reconnecting banner", async () => {
   expect(screen.queryByText("Reconnecting to the engine…")).not.toBeInTheDocument();
 });
 
+test("drone video lost banner while the source is reconnecting", async () => {
+  const { fake } = await setup();
+  expect(screen.queryByText("Drone video lost — reconnecting…")).not.toBeInTheDocument();
+  act(() => fake.send({ type: "status", status: { ...STATUS, source_state: "reconnecting" } }));
+  expect(screen.getByText("Drone video lost — reconnecting…")).toBeInTheDocument();
+  expect(screen.getByText("Reconnecting", { selector: ".stat-value" })).toBeInTheDocument();
+  // separate from the websocket banner: both can show
+  act(() => fake.state("reconnecting"));
+  expect(screen.getByText("Reconnecting to the engine…")).toBeInTheDocument();
+  expect(screen.getByText("Drone video lost — reconnecting…")).toBeInTheDocument();
+  act(() => fake.send({ type: "status", status: { ...STATUS, source_state: "running" } }));
+  expect(screen.queryByText("Drone video lost — reconnecting…")).not.toBeInTheDocument();
+});
+
 test("stream image carries the client stream url", async () => {
   await setup();
   expect(screen.getByAltText("Live drone video with truck boxes")).toHaveAttribute(

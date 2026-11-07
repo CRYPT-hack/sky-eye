@@ -1,6 +1,6 @@
 // Shapes of the engine's JSON API (api version 1). Times are ISO-8601 UTC strings.
 
-export type SourceState = "starting" | "running" | "ended" | "error";
+export type SourceState = "starting" | "running" | "reconnecting" | "ended" | "error";
 
 export interface Status {
   source_state: SourceState;
@@ -11,6 +11,8 @@ export interface Status {
   started_at: string;
   telemetry_state: string;
 }
+
+export type ClipStatus = "pending" | "saved" | "skipped" | "failed" | "removed";
 
 export interface Truck {
   id: number;
@@ -26,11 +28,15 @@ export interface Truck {
   lon: number | null;
   geo_error_m: number | null;
   geo_status: string;
+  /** Absent on engines that predate clip status. */
+  clip_status?: ClipStatus;
 }
 
 export interface Runtime {
   confidence: number;
   sahi_enabled: boolean;
+  /** Alert channel name -> switched on. Absent on engines without alerts. */
+  alerts?: Record<string, boolean>;
 }
 
 export interface Info {
@@ -45,6 +51,8 @@ export interface Info {
   };
   auth: "none" | "token";
   dashboard: boolean;
+  /** Configured alert channels (desktop, telegram, mqtt); may be empty or absent. */
+  alerts?: string[];
 }
 
 export type LiveMessage =
