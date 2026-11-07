@@ -1,8 +1,14 @@
 # sky-eye example config. Relative paths resolve against this file's folder.
 source:
-  type: file            # file | capture
+  type: file            # file | capture | stream | go2rtc
   path: samples/drone.mp4
-  device: 0             # capture device index
+  device: 0             # type: capture - capture device index (HDMI capture card, webcam)
+  # type: stream - rtsp, rtsps, rtmp, rtmps, udp, http or https URL (srt: via MediaMTX)
+  #   url: rtsp://192.168.1.20:8554/live
+  # type: go2rtc - a stream of a local go2rtc server, read from its RTSP output
+  #   go2rtc:
+  #     name: drone
+  #     rtsp_base: rtsp://127.0.0.1:8554
   realtime: true
   loop: false
 
@@ -26,6 +32,22 @@ evidence:
   clip_after_s: 5
   snapshot_window_s: 2
   max_disk_gb: 20
+
+alerts:
+  cooldown_s: 10        # trucks seen within this many seconds of the last alert are batched
+  desktop: true         # Windows toast + beep on the machine running the engine
+  # Telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env
+  # telegram:
+  #   enabled: true
+  #   dashboard_url: http://192.168.1.10:8000
+  # MQTT password (optional, used only with a username) is MQTT_PASSWORD in .env
+  # mqtt:
+  #   enabled: true
+  #   host: 127.0.0.1
+  #   port: 1883
+  #   topic: sky-eye/events
+  #   username: null
+  #   tls: false
 
 api:
   host: 0.0.0.0

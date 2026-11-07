@@ -84,6 +84,33 @@ test("reconnecting banner", async () => {
   expect(screen.queryByText("Reconnecting to the engine…")).not.toBeInTheDocument();
 });
 
+test("waiting for drone video banner while the stream has not connected yet", async () => {
+  const { fake } = await setup();
+  act(() => fake.send({ type: "status", status: { ...STATUS, source_state: "starting" } }));
+  expect(screen.queryByText("Waiting for drone video…")).not.toBeInTheDocument();
+  act(() => fake.send({ type: "status", status: { ...STATUS, source_state: "connecting" } }));
+  expect(screen.getByText("Waiting for drone video…")).toBeInTheDocument();
+  expect(screen.getByText("Connecting", { selector: ".stat-value" })).toBeInTheDocument();
+  // not a lost link: the drone video was never there yet
+  expect(screen.queryByText("Drone video lost — reconnecting…")).not.toBeInTheDocument();
+  act(() => fake.send({ type: "status", status: { ...STATUS, source_state: "running" } }));
+  expect(screen.queryByText("Waiting for drone video…")).not.toBeInTheDocument();
+});
+
+test("drone video lost banner while the source is reconnecting", async () => {
+  const { fake } = await setup();
+  expect(screen.queryByText("Drone video lost — reconnecting…")).not.toBeInTheDocument();
+  act(() => fake.send({ type: "status", status: { ...STATUS, source_state: "reconnecting" } }));
+  expect(screen.getByText("Drone video lost — reconnecting…")).toBeInTheDocument();
+  expect(screen.getByText("Reconnecting", { selector: ".stat-value" })).toBeInTheDocument();
+  // separate from the websocket banner: both can show
+  act(() => fake.state("reconnecting"));
+  expect(screen.getByText("Reconnecting to the engine…")).toBeInTheDocument();
+  expect(screen.getByText("Drone video lost — reconnecting…")).toBeInTheDocument();
+  act(() => fake.send({ type: "status", status: { ...STATUS, source_state: "running" } }));
+  expect(screen.queryByText("Drone video lost — reconnecting…")).not.toBeInTheDocument();
+});
+
 test("stream image carries the client stream url", async () => {
   await setup();
   expect(screen.getByAltText("Live drone video with truck boxes")).toHaveAttribute(

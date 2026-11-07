@@ -9,6 +9,14 @@ import { href } from "../router";
 /** A truck seen this recently may still have its clip encoding (up to about a minute). */
 const CLIP_WAIT_MS = 120_000;
 const CLIP_POLL_MS = 3000;
+/** With clip_status the engine always resolves "pending"; stop asking after this, just in case. */
+const CLIP_PENDING_MAX_MS = 600_000;
+
+const CLIP_MESSAGE = {
+  skipped: "No clip: too many trucks at once",
+  failed: "Clip could not be saved",
+  removed: "Clip removed to free disk space",
+} as const;
 
 /** No clip yet, but last seen under CLIP_WAIT_MS ago: the engine may still be saving it. */
 function clipPending(truck: Truck, now: number): boolean {
@@ -17,11 +25,56 @@ function clipPending(truck: Truck, now: number): boolean {
   return Number.isFinite(lastSeen) && now - lastSeen < CLIP_WAIT_MS;
 }
 
+/**
+ * Whether to fetch the truck again for its clip. Engines that report clip_status say so
+ * themselves (until `since`+10 min); older ones get the last_seen heuristic.
+ */
+function keepPolling(truck: Truck, now: number, since: number): boolean {
+  if (truck.clip_status === undefined) return clipPending(truck, now);
+  return truck.clip_status === "pending" && now - since < CLIP_PENDING_MAX_MS;
+}
+
 type State =
   | { kind: "loading" }
   | { kind: "ok"; truck: Truck; clipPending: boolean }
   | { kind: "notfound" }
   | { kind: "error" };
+
+/** What to show in place of the player when the truck has no clip file. */
+function clipNotice(t: Truck, polling: boolean) {
+  const status = t.clip_status;
+  if (status === undefined) {
+    return polling ? (
+      <p className="muted" role="status">
+        Clip is being saved…
+      </p>
+    ) : (
+      <p className="muted">No clip saved for this truck</p>
+    );
+  }
+  if (status === "pending") {
+    return polling ? (
+      <p className="muted" role="status">
+        Clip is being saved…
+      </p>
+    ) : (
+      <p className="muted">Clip status unknown</p>
+    );
+  }
+  // "saved" without a clip_url should not happen; skipped, failed and removed explain themselves.
+  if (status === "saved") return <p className="muted">No clip saved for this truck</p>;
+  if (Object.hasOwn(CLIP_MESSAGE, status)) {
+    return <p className="muted">{CLIP_MESSAGE[status as keyof typeof CLIP_MESSAGE]}</p>;
+  }
+  // A status from a newer engine that this site does not know yet.
+  return <p className="muted">{`Clip status: ${String(status)}`}</p>;
+}
+
+/** The player only for a saved clip; engines without clip_status: whenever there is a clip. */
+function playableClip(t: Truck): string | null {
+  if (t.clip_status !== undefined && t.clip_status !== "saved") return null;
+  return t.clip_url;
+}
 
 export default function TruckDetail({ id }: { id: number }) {
   const { client, authEpoch, reportUnauthorized } = useApi();
@@ -34,6 +87,7 @@ export default function TruckDetail({ id }: { id: number }) {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let shown: Truck | null = null;
+    const since = Date.now();
     setState({ kind: "loading" });
 
     const load = () => {
@@ -42,7 +96,7 @@ export default function TruckDetail({ id }: { id: number }) {
         .then((truck) => {
           if (cancelled) return;
           shown = truck;
-          const pending = clipPending(truck, Date.now());
+          const pending = keepPolling(truck, Date.now(), since);
           setState({ kind: "ok", truck, clipPending: pending });
           if (pending) timer = setTimeout(load, CLIP_POLL_MS);
         })
@@ -54,7 +108,7 @@ export default function TruckDetail({ id }: { id: number }) {
           }
           if (shown !== null) {
             // A failed re-check keeps the truck on screen and tries again.
-            if (clipPending(shown, Date.now())) timer = setTimeout(load, CLIP_POLL_MS);
+            if (keepPolling(shown, Date.now(), since)) timer = setTimeout(load, CLIP_POLL_MS);
             else setState({ kind: "ok", truck: shown, clipPending: false });
             return;
           }
@@ -110,6 +164,7 @@ export default function TruckDetail({ id }: { id: number }) {
   }
 
   const t = state.truck;
+  const clip = playableClip(t);
   return (
     <div className="stack">
       {back}
@@ -131,20 +186,16 @@ export default function TruckDetail({ id }: { id: number }) {
           <p>No full frame saved</p>
         </div>
       )}
-      {t.clip_url ? (
+      {clip ? (
         <video
           className="detail-media"
           controls
           playsInline
           preload="metadata"
-          src={client.mediaUrl(t.clip_url)}
+          src={client.mediaUrl(clip)}
         />
-      ) : state.clipPending ? (
-        <p className="muted" role="status">
-          Clip is being saved…
-        </p>
       ) : (
-        <p className="muted">No clip saved for this truck</p>
+        clipNotice(t, state.clipPending)
       )}
       <dl className="facts">
         <dt>First seen</dt>

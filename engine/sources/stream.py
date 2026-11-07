@@ -138,8 +138,10 @@ class StreamSource:
     """A live network stream. A background thread connects, decodes and keeps
     only the newest frame; read() hands it out once and never blocks.
 
-    state is "reconnecting" from open() until a frame arrives, then "running".
-    The source never ends: on a connect failure, a read error, the stream
+    state is "reconnecting" from open() until a frame arrives, then "running";
+    failed_attempts counts the connection attempts that failed since the last
+    frame (0 while the first attempt is still connecting). The source never
+    ends: on a connect failure, a read error, the stream
     ending or no frame for `read_timeout_s` (for the first frame of a
     connection: max(read_timeout_s, open_timeout_s), so a long-GOP camera can
     reach its first keyframe), state turns "reconnecting" again and the thread
@@ -187,6 +189,7 @@ class StreamSource:
         self._lock = threading.Lock()
         self._latest: tuple[np.ndarray, float, datetime] | None = None
         self._state = "reconnecting"  # until the first frame
+        self._failed_attempts = 0  # since the last frame
         self._size: tuple[int, int] | None = None
 
     # ----- VideoSource -----
@@ -203,6 +206,7 @@ class StreamSource:
         with self._lock:
             self._latest = None
             self._state = "reconnecting"
+            self._failed_attempts = 0
         self._index = 0
         self._backoff.reset()
         self._t0 = self._clock()
@@ -250,6 +254,12 @@ class StreamSource:
             return self._state
 
     @property
+    def failed_attempts(self) -> int:
+        """Connection attempts that failed since the last frame (0 = none yet)."""
+        with self._lock:
+            return self._failed_attempts
+
+    @property
     def url(self) -> str:
         return self._url
 
@@ -275,6 +285,7 @@ class StreamSource:
             with self._lock:
                 was_running = self._state == "running"
                 self._state = "reconnecting"
+                self._failed_attempts += 1
             attempted.set()
             failures = 1 if was_running else failures + 1
             delay = self._backoff.next_delay()
@@ -331,6 +342,7 @@ class StreamSource:
             self._size = (width, height)
             recovered = self._state != "running"
             self._state = "running"
+            self._failed_attempts = 0
         self._backoff.reset()
         if recovered:
             log.info("video stream %s: receiving frames", redact_url(self._url))

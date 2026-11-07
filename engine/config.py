@@ -33,7 +33,10 @@ def _url_problem(url: str, schemes: tuple[str, ...]) -> str | None:
     if "://" not in url or not parts.scheme:
         return f"needs a scheme, one of: {', '.join(schemes)} (e.g. {schemes[0]}://host/path)"
     if parts.scheme == "srt":  # the PyAV wheels are built without libsrt
-        return "SRT is not supported directly; relay it through go2rtc (type: go2rtc)"
+        return (
+            "SRT is not supported directly; "
+            "let a relay such as MediaMTX ingest it and read its RTSP output"
+        )
     if parts.scheme not in schemes:
         return f"unsupported scheme {parts.scheme!r}; use one of: {', '.join(schemes)}"
     # urlsplit ends the authority at the first / ? or #; an "@" after that means
@@ -162,12 +165,55 @@ class ApiConfig(_Model):
     dashboard_dir: Path | None = None  # None = <repo>/dashboard/dist
 
 
+class TelegramConfig(_Model):
+    enabled: bool = False
+    dashboard_url: str | None = None
+
+    @model_validator(mode="after")
+    def _enabled_needs_env(self) -> TelegramConfig:
+        # the secrets stay in the environment; only their presence is checked here
+        if self.enabled:
+            for var in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+                if not os.environ.get(var):
+                    raise ValueError(f"telegram alerts require env var {var}")
+        return self
+
+
+class MqttConfig(_Model):
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = Field(default=1883, ge=1, le=65535)
+    topic: str = "sky-eye/events"
+    username: str | None = None  # the password is env MQTT_PASSWORD
+    tls: bool = False
+
+
+class AlertsConfig(_Model):
+    cooldown_s: float = Field(default=10, gt=0)
+    desktop: bool = True
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    mqtt: MqttConfig = Field(default_factory=MqttConfig)
+
+    def channels(self) -> list[str]:
+        """Configured channel names, in a fixed order."""
+        return [
+            name
+            for name, on in (
+                ("desktop", self.desktop),
+                ("telegram", self.telegram.enabled),
+                ("mqtt", self.mqtt.enabled),
+            )
+            if on
+        ]
+
+
 class AppConfig(_Model):
     source: SourceConfig = Field(default_factory=SourceConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    alerts: AlertsConfig = Field(default_factory=AlertsConfig)
 
 
 _PATH_FIELDS = (("source", "path"), ("detector", "weights"), ("evidence", "data_dir"),

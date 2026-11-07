@@ -51,7 +51,11 @@ class VideoSource(Protocol):
 
     @property
     def state(self) -> str:
-        """Either "running" or "reconnecting" (a live source that lost its input)."""
+        """Either "running" or "reconnecting" (a live source that lost its input).
+
+        A live source may also offer failed_attempts (int): attempts to get its
+        input that failed since the last frame; the pipeline reads it with getattr.
+        """
         ...
 
 

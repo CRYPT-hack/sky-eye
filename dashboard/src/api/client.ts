@@ -23,6 +23,8 @@ export interface ApiClient {
   getTruck(id: number): Promise<Truck>;
   getRuntime(): Promise<Runtime>;
   putRuntime(patch: Partial<Runtime>): Promise<Runtime>;
+  /** Sends a test alert; resolves with the channels it reached (may be empty). */
+  sendTestAlert(): Promise<string[]>;
   mediaUrl(path: string): string;
   streamUrl(): string;
   liveUrl(): string;
@@ -96,6 +98,14 @@ export function createClient(opts: ClientOptions): ApiClient {
         body: JSON.stringify(patch),
       });
       return r.runtime;
+    },
+    async sendTestAlert() {
+      const r = await request<{ sent: string[] }>("/api/alerts/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      return r.sent;
     },
     mediaUrl: withToken,
     streamUrl() {

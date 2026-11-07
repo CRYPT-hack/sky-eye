@@ -40,6 +40,7 @@ export function makeClient(trucks: Truck[] = [], status: Status = STATUS): ApiCl
     getTruck: vi.fn(),
     getRuntime: vi.fn(),
     putRuntime: vi.fn(),
+    sendTestAlert: vi.fn(),
     mediaUrl: (p: string) => `${p}?token=t`,
     streamUrl: () => "/stream.mjpg?token=t",
     liveUrl: () => "ws://x/ws",

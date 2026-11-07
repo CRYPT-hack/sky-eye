@@ -17,6 +17,10 @@ from types import FrameType
 import uvicorn
 
 from engine.api.app import VERSION, EngineContext, create_app
+from engine.alerts.core import AlertDispatcher, Notifier
+from engine.alerts.desktop import DesktopNotifier
+from engine.alerts.mqtt import MqttNotifier
+from engine.alerts.telegram import TelegramNotifier
 from engine.config import AppConfig, ConfigError, SourceConfig, load_config
 from engine.detectors.rfdetr import DetectorError, build_detector
 from engine.events.bus import EventBus
@@ -32,6 +36,10 @@ from engine.tracking import build_tracker
 log = logging.getLogger(__name__)
 
 _STOP_TIMEOUT_S = 5.0
+# After the pipeline stopped: the alert dispatcher and every notifier share this
+# deadline (the dispatcher's workers get at most _DISPATCHER_STOP_S of it).
+_ALERTS_STOP_S = 3.0
+_DISPATCHER_STOP_S = 1.5
 # Backstop: uvicorn cancels responses still open this long after an exit request.
 _GRACEFUL_SHUTDOWN_S = 3
 _INLINE_COMMENT = re.compile(r"\s+#.*$")
@@ -138,7 +146,39 @@ def _engine_info(cfg: AppConfig, source_fps: float) -> dict[str, Any]:
             "classes": list(cfg.detector.classes),
         },
         "auth": cfg.api.auth.mode,
+        "alerts": cfg.alerts.channels(),
     }
+
+
+def _build_notifiers(cfg: AppConfig, data_dir: Path) -> list[Notifier]:
+    """Notifiers for the configured channels, in the order desktop, telegram, mqtt.
+    The secrets are read from the environment here and nowhere else."""
+    alerts = cfg.alerts
+    notifiers: list[Notifier] = []
+    if alerts.desktop:
+        notifiers.append(DesktopNotifier())
+    if alerts.telegram.enabled:
+        notifiers.append(
+            TelegramNotifier(
+                os.environ["TELEGRAM_BOT_TOKEN"],
+                os.environ["TELEGRAM_CHAT_ID"],
+                media_dir(data_dir),
+                alerts.telegram.dashboard_url,
+            )
+        )
+    if alerts.mqtt.enabled:
+        m = alerts.mqtt
+        notifiers.append(
+            MqttNotifier(
+                m.host,
+                m.port,
+                m.topic,
+                m.username,
+                os.environ.get("MQTT_PASSWORD") if m.username else None,
+                m.tls,
+            )
+        )
+    return notifiers
 
 
 def build_engine(cfg: AppConfig) -> EngineContext:
@@ -180,8 +220,13 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             data_dir, cfg.evidence.clip_before_s, cfg.evidence.clip_after_s
         )
         repo = TruckRepository(data_dir / "sky-eye.db")
-        run_id = repo.create_run(label, _config_json(cfg))
         remove_partial_clips(media_dir(data_dir))
+        # before this run's trucks exist: any clip still pending is from a run that
+        # crashed or was killed, and will never be written
+        stale = repo.fail_pending_clips()
+        if stale:
+            log.info("%d clip(s) left pending by an earlier run marked as failed", stale)
+        run_id = repo.create_run(label, _config_json(cfg))
         bus = EventBus()
         manager = EventManager(
             repo,
@@ -192,7 +237,10 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             cfg.evidence.snapshot_window_s,
             int(cfg.evidence.max_disk_gb * 1024**3),
         )
-        runtime = RuntimeSettings(confidence=cfg.detector.confidence)
+        runtime = RuntimeSettings(
+            confidence=cfg.detector.confidence,
+            alerts={name: True for name in cfg.alerts.channels()},
+        )
         pipeline = Pipeline(
             source,
             detector,
@@ -202,6 +250,13 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             runtime,
             realtime=cfg.source.realtime,
             stream_max_width=cfg.api.stream_max_width,
+        )
+        notifiers = _build_notifiers(cfg, data_dir)
+        dispatcher = AlertDispatcher(
+            bus,
+            notifiers,
+            enabled=lambda name: runtime.alerts.get(name, False),
+            cooldown_s=cfg.alerts.cooldown_s,
         )
     except BaseException:
         try:
@@ -220,6 +275,8 @@ def build_engine(cfg: AppConfig) -> EngineContext:
         token=os.environ.get("SKYEYE_API_TOKEN"),
         info=_engine_info(cfg, source.fps),
         dashboard_dir=cfg.api.dashboard_dir or _default_dashboard_dir(),
+        alerts=dispatcher if notifiers else None,
+        notifiers=notifiers,
     )
 
 
@@ -302,6 +359,16 @@ def _fail(message: str) -> int:
     return 2
 
 
+def on_started(ctx: EngineContext, url: str) -> None:
+    """Runs once the HTTP server is listening: the alerts first (so they see every
+    truck.new), then the pipeline, then the dashboard URL."""
+    if ctx.alerts is not None:
+        ctx.alerts.start()
+    ctx.pipeline.start()
+    log.info("listening on %s:%d; dashboard at %s", ctx.api.host, ctx.api.port, url)
+    print(f"Dashboard: {url}", flush=True)
+
+
 def _stop_pipeline(ctx: EngineContext) -> bool:
     """Stop the pipeline in a helper thread; give up after 5 s. True if it stopped."""
     stopper = threading.Thread(target=ctx.pipeline.stop, name="sky-eye-stop", daemon=True)
@@ -313,20 +380,64 @@ def _stop_pipeline(ctx: EngineContext) -> bool:
     return True
 
 
+def _stop_alerts(ctx: EngineContext) -> None:
+    """Stop the alert dispatcher, then close every notifier, in one helper thread.
+    Gives up after _ALERTS_STOP_S in total and names what did not finish."""
+    steps: list[tuple[str, Callable[[], object]]] = []
+    alerts = getattr(ctx, "alerts", None)
+    if alerts is not None:
+        steps.append(("alert dispatcher", lambda: alerts.stop(timeout=_DISPATCHER_STOP_S)))
+    for notifier in getattr(ctx, "notifiers", ()):
+        close = getattr(notifier, "close", None)
+        if callable(close):
+            steps.append((f"{getattr(notifier, 'name', 'alert')} notifier", close))
+    if not steps:
+        return
+    lock = threading.Lock()
+    unfinished = [name for name, _ in steps]
+
+    def run() -> None:
+        for name, step in steps:
+            try:
+                step()
+            except BaseException as exc:  # noqa: BLE001 - never block the shutdown
+                log.warning("stopping the %s failed: %s", name, type(exc).__name__)
+            with lock:
+                unfinished.remove(name)
+
+    worker = threading.Thread(target=run, name="sky-eye-alerts-stop", daemon=True)
+    worker.start()
+    worker.join(_ALERTS_STOP_S)
+    if worker.is_alive():
+        with lock:
+            left = ", ".join(unfinished)
+        log.warning(
+            "alerts did not finish stopping within %.0f s (%s); exiting anyway",
+            _ALERTS_STOP_S,
+            left,
+        )
+
+
 def shutdown_engine(ctx: EngineContext) -> None:
-    """Stop the pipeline and close the database. If the pipeline does not stop
-    within 5 s, flush the logs and exit the process with code 1."""
+    """Stop the pipeline (at most 5 s), then the alerts (at most 3 s more), and
+    always close the database. If the pipeline does not stop within 5 s, flush the
+    logs and exit the process with code 1 (the pipeline may still use the database)."""
     ctx.shutdown.set()
     try:
         clean = _stop_pipeline(ctx)
     except KeyboardInterrupt:  # another Ctrl+C while waiting: stop waiting
         clean = False
-    if clean:
-        ctx.repo.close()
-        log.info("engine stopped")
+    if not clean:
+        logging.shutdown()
+        _hard_exit(1)
         return
-    logging.shutdown()
-    _hard_exit(1)
+    try:
+        _stop_alerts(ctx)
+    except KeyboardInterrupt:  # another Ctrl+C while waiting: stop waiting
+        log.warning("interrupted while stopping the alerts; closing the database")
+    finally:
+        ctx.repo.close()
+    log.info("engine stopped")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -356,14 +467,7 @@ def main(argv: list[str] | None = None) -> int:
         return _fail(f"error: {exc}")
 
     url = _dashboard_url(cfg.api.host, cfg.api.port)
-
-    def on_started() -> None:
-        # only once the server is listening: the pipeline, then the URL
-        ctx.pipeline.start()
-        log.info("listening on %s:%d; dashboard at %s", cfg.api.host, cfg.api.port, url)
-        print(f"Dashboard: {url}", flush=True)
-
-    server = build_server(ctx, on_started)
+    server = build_server(ctx, lambda: on_started(ctx, url))
     try:
         server.run(sockets=[sock])
     except KeyboardInterrupt:

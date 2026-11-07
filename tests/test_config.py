@@ -193,12 +193,12 @@ def test_source_config_stream_and_go2rtc(tmp_path):
         build_source(SourceConfig.model_construct(type="go2rtc"))
 
 
-def test_stream_srt_points_to_go2rtc(tmp_path):
+def test_stream_srt_points_to_a_relay(tmp_path):
     # the PyAV wheels have no libsrt
     with pytest.raises(
         ConfigError,
         match=r"source\.url: SRT is not supported directly; "
-        r"relay it through go2rtc \(type: go2rtc\)",
+        r"let a relay such as MediaMTX ingest it and read its RTSP output",
     ):
         load_config(_write(tmp_path, "source:\n  type: stream\n  url: srt://10.0.0.5:9000\n"))
 
@@ -229,3 +229,31 @@ def test_stream_url_encoded_or_raw_at_in_password_accepted(tmp_path):
     # a raw @ is fine: urlsplit and FFmpeg both split the authority at the last one
     cfg = load_config(_write(tmp_path, "source:\n  type: stream\n  url: rtsp://u:p@ss@cam/live\n"))
     assert cfg.source.url == "rtsp://u:p@ss@cam/live"
+
+
+def test_alerts_config_defaults_and_bounds(tmp_path):
+    cfg = load_config(_write(tmp_path, "{}"))
+    a = cfg.alerts
+    assert a.cooldown_s == 10 and a.desktop is True
+    assert a.telegram.enabled is False and a.telegram.dashboard_url is None
+    assert a.mqtt.enabled is False and a.mqtt.host == "127.0.0.1" and a.mqtt.port == 1883
+    assert a.mqtt.topic == "sky-eye/events" and a.mqtt.username is None and a.mqtt.tls is False
+    for bad in ("alerts:\n  cooldown_s: 0", "alerts:\n  mqtt:\n    port: 0",
+                "alerts:\n  mqtt:\n    port: 65536", "alerts:\n  sms: true"):
+        with pytest.raises(ConfigError):
+            load_config(_write(tmp_path, bad))
+    ok = load_config(_write(tmp_path, "alerts:\n  mqtt:\n    port: 65535"))
+    assert ok.alerts.mqtt.port == 65535
+
+
+def test_telegram_enabled_requires_env(tmp_path, monkeypatch):
+    text = "alerts:\n  telegram:\n    enabled: true"
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    with pytest.raises(ConfigError, match="TELEGRAM_BOT_TOKEN"):
+        load_config(_write(tmp_path, text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    with pytest.raises(ConfigError, match="TELEGRAM_CHAT_ID"):
+        load_config(_write(tmp_path, text))
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    assert load_config(_write(tmp_path, text)).alerts.telegram.enabled is True

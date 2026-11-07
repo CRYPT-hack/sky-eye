@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ApiError } from "../api/client";
 import type { Info, Runtime } from "../api/types";
@@ -39,15 +39,20 @@ function Gate() {
   return unauthorized ? <TokenPrompt /> : null;
 }
 
-function setup(over: { info?: Info | Error } = {}) {
+function setup(over: { info?: Info | Error; runtime?: Runtime } = {}) {
+  const runtime = over.runtime ?? RUNTIME;
   const client = makeClient();
   const c = client as unknown as Record<string, ReturnType<typeof vi.fn>>;
   c.getInfo.mockImplementation(async () => {
     if (over.info instanceof Error) throw over.info;
     return over.info ?? INFO;
   });
-  c.getRuntime.mockImplementation(async () => RUNTIME);
-  c.putRuntime.mockImplementation(async (p: Partial<Runtime>) => ({ ...RUNTIME, ...p }));
+  c.getRuntime.mockImplementation(async () => runtime);
+  c.putRuntime.mockImplementation(async (p: Partial<Runtime>) => ({
+    ...runtime,
+    ...p,
+    ...(p.alerts ? { alerts: { ...runtime.alerts, ...p.alerts } } : {}),
+  }));
   const view = render(
     <ApiProvider client={client} initialToken="t">
       <StatusPage />
@@ -295,4 +300,114 @@ test("failed info load is retried on the next poll", async () => {
   expect(screen.getByText("0.2.0")).toBeInTheDocument();
   expect(screen.getByLabelText("Confidence")).toBeEnabled();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+const ALERT_INFO: Info = { ...INFO, alerts: ["desktop", "telegram"] };
+const ALERT_RT: Runtime = { ...RUNTIME, alerts: { desktop: true, telegram: true } };
+
+test("alerts section is hidden without configured channels", async () => {
+  setup();
+  await flush();
+  expect(screen.queryByText("Alerts")).not.toBeInTheDocument();
+  cleanup();
+  setup({ info: { ...INFO, alerts: [] } });
+  await flush();
+  expect(screen.queryByText("Alerts")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Send test alert" })).not.toBeInTheDocument();
+});
+
+test("alert switches render only configured channels and save", async () => {
+  const { c } = setup({ info: ALERT_INFO, runtime: ALERT_RT });
+  await flush();
+  expect(screen.getAllByRole("switch")).toHaveLength(2);
+  const laptop = screen.getByRole("switch", { name: "Laptop" });
+  const telegram = screen.getByRole("switch", { name: "Telegram" });
+  expect(screen.queryByRole("switch", { name: "MQTT" })).not.toBeInTheDocument();
+  expect(laptop).toBeChecked();
+  fireEvent.click(telegram);
+  expect(telegram).not.toBeChecked(); // immediately
+  expect(c.putRuntime).toHaveBeenCalledWith({ alerts: { telegram: false } });
+  await flush();
+  expect(telegram).not.toBeChecked();
+  expect(laptop).toBeChecked();
+});
+
+test("channel missing from runtime.alerts shows off", async () => {
+  setup({ info: { ...INFO, alerts: ["mqtt"] }, runtime: { ...RUNTIME, alerts: {} } });
+  await flush();
+  expect(screen.getByRole("switch", { name: "MQTT" })).not.toBeChecked();
+});
+
+test("alert switch reverts on error", async () => {
+  const { c } = setup({ info: ALERT_INFO, runtime: ALERT_RT });
+  c.putRuntime.mockRejectedValueOnce(new ApiError(422, "unknown alert channel: telegram"));
+  await flush();
+  const telegram = screen.getByRole("switch", { name: "Telegram" });
+  fireEvent.click(telegram);
+  await flush();
+  expect(telegram).toBeChecked();
+  expect(screen.getByRole("alert")).toHaveTextContent("unknown alert channel: telegram");
+});
+
+test("toggling two channels at once does not clobber either", async () => {
+  const { c } = setup({ info: ALERT_INFO, runtime: ALERT_RT });
+  let resolveA!: (r: Runtime) => void;
+  c.putRuntime.mockImplementationOnce(() => new Promise<Runtime>((res) => (resolveA = res)));
+  await flush();
+  const laptop = screen.getByRole("switch", { name: "Laptop" });
+  const telegram = screen.getByRole("switch", { name: "Telegram" });
+  fireEvent.click(laptop);
+  fireEvent.click(telegram);
+  await flush();
+  expect(c.putRuntime).toHaveBeenNthCalledWith(1, { alerts: { desktop: false } });
+  expect(c.putRuntime).toHaveBeenNthCalledWith(2, { alerts: { telegram: false } });
+  // laptop's (older) response arrives last, carrying the server's view at that time
+  await act(async () => resolveA({ ...RUNTIME, alerts: { desktop: false, telegram: true } }));
+  expect(laptop).not.toBeChecked();
+  expect(telegram).not.toBeChecked();
+});
+
+test("an older response for the same channel cannot overwrite a newer choice", async () => {
+  const { c } = setup({ info: ALERT_INFO, runtime: ALERT_RT });
+  let resolveOff!: (r: Runtime) => void;
+  c.putRuntime.mockImplementationOnce(() => new Promise<Runtime>((res) => (resolveOff = res)));
+  await flush();
+  const telegram = screen.getByRole("switch", { name: "Telegram" });
+  fireEvent.click(telegram); // off
+  fireEvent.click(telegram); // on again
+  await flush();
+  await act(async () => resolveOff({ ...RUNTIME, alerts: { telegram: false } }));
+  expect(telegram).toBeChecked();
+});
+
+test("send test alert shows the channels it was queued for", async () => {
+  const { c } = setup({ info: ALERT_INFO, runtime: ALERT_RT });
+  let resolve!: (s: string[]) => void;
+  c.sendTestAlert.mockImplementationOnce(() => new Promise<string[]>((res) => (resolve = res)));
+  await flush();
+  const button = screen.getByRole("button", { name: "Send test alert" });
+  fireEvent.click(button);
+  await flush();
+  expect(button).toBeDisabled();
+  await act(async () => resolve(["desktop", "telegram"]));
+  expect(button).toBeEnabled();
+  expect(
+    screen.getByText("Test queued for: Laptop, Telegram — check the engine log if nothing arrives."),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/Sent to/)).not.toBeInTheDocument();
+});
+
+test("send test alert with nothing switched on, and with an error", async () => {
+  const { c } = setup({ info: ALERT_INFO, runtime: ALERT_RT });
+  c.sendTestAlert.mockResolvedValueOnce([]);
+  c.sendTestAlert.mockRejectedValueOnce(new ApiError(409, "no alert channels configured"));
+  await flush();
+  const button = screen.getByRole("button", { name: "Send test alert" });
+  fireEvent.click(button);
+  await flush();
+  expect(screen.getByText("No channel is switched on")).toBeInTheDocument();
+  fireEvent.click(button);
+  await flush();
+  expect(screen.queryByText("No channel is switched on")).not.toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("no alert channels configured");
 });

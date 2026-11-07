@@ -215,3 +215,100 @@ describe("clip still being saved", () => {
     expect(mock.mock.calls).toHaveLength(calls);
   });
 });
+
+describe("clip_status from the engine", () => {
+  const NOW = new Date("2026-11-06T06:00:20Z");
+  afterEach(() => vi.useRealTimers());
+
+  async function flush(ms = 0) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  function start(...responses: Truck[]) {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    vi.setSystemTime(NOW);
+    const client = makeClient();
+    const mock = client.getTruck as ReturnType<typeof vi.fn>;
+    let i = 0;
+    mock.mockImplementation(async () => responses[Math.min(i++, responses.length - 1)]);
+    const view = render(
+      <ApiProvider client={client} initialToken="t">
+        <TruckDetail id={5} />
+      </ApiProvider>,
+    );
+    return { mock, view };
+  }
+
+  test("clip status messages", async () => {
+    const cases: [Truck["clip_status"], string][] = [
+      ["pending", "Clip is being saved…"],
+      ["skipped", "No clip: too many trucks at once"],
+      ["failed", "Clip could not be saved"],
+      ["removed", "Clip removed to free disk space"],
+    ];
+    for (const [clip_status, text] of cases) {
+      const { view } = start(makeTruck(5, { clip_status, ...OLD }));
+      await flush();
+      expect(screen.getByText(text)).toBeInTheDocument();
+      expect(screen.queryByText("No clip saved for this truck")).not.toBeInTheDocument();
+      expect(view.container.querySelector("video")).toBeNull();
+      view.unmount();
+    }
+  });
+
+  test("an unknown future clip status is shown as it is, without a player", async () => {
+    const { view } = start(
+      makeTruck(5, {
+        clip_status: "archived" as never,
+        clip_url: "/media/clip5.mp4",
+        ...OLD,
+      }),
+    );
+    await flush();
+    expect(screen.getByText("Clip status: archived")).toBeInTheDocument();
+    expect(view.container.querySelector("video")).toBeNull();
+  });
+
+  test("a clip_url with a status other than saved shows no player", async () => {
+    const { view } = start(
+      makeTruck(5, { clip_status: "removed", clip_url: "/media/clip5.mp4", ...OLD }),
+    );
+    await flush();
+    expect(screen.getByText("Clip removed to free disk space")).toBeInTheDocument();
+    expect(view.container.querySelector("video")).toBeNull();
+  });
+
+  test("saved shows the player", async () => {
+    const { view } = start(
+      makeTruck(5, { clip_status: "saved", clip_url: "/media/clip5.mp4", ...OLD }),
+    );
+    await flush();
+    expect(view.container.querySelector("video")!.getAttribute("src")).toBe(
+      "/media/clip5.mp4?token=t",
+    );
+  });
+
+  test("pending on an old truck still polls, well past 120 s, until saved", async () => {
+    const { mock, view } = start(
+      makeTruck(5, { clip_status: "pending", ...OLD }),
+      makeTruck(5, { clip_status: "pending", ...OLD }),
+      makeTruck(5, { clip_status: "saved", clip_url: "/media/clip5.mp4", ...OLD }),
+    );
+    await flush(200_000);
+    expect(mock).toHaveBeenCalledTimes(3);
+    expect(view.container.querySelector("video")).not.toBeNull();
+  });
+
+  test("pending keeps polling for 10 minutes, then says the status is unknown", async () => {
+    const { mock } = start(makeTruck(5, { clip_status: "pending", ...OLD }));
+    await flush(599_000);
+    expect(screen.getByText("Clip is being saved…")).toBeInTheDocument();
+    await flush(3000);
+    expect(screen.getByText("Clip status unknown")).toBeInTheDocument();
+    const calls = mock.mock.calls.length;
+    await flush(30_000);
+    expect(mock).toHaveBeenCalledTimes(calls);
+  });
+});

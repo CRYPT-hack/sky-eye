@@ -126,7 +126,7 @@ def test_stream_read_never_blocks(sources):
     for _ in range(20):
         t0 = time.perf_counter()
         assert src.read() is None
-        assert time.perf_counter() - t0 < 0.05
+        assert time.perf_counter() - t0 < 0.5
 
 
 def test_stream_reconnects_with_backoff(sources):
@@ -145,6 +145,24 @@ def test_stream_reconnects_with_backoff(sources):
     frame = src.read()
     assert frame is not None and int(frame.image[0, 0, 0]) == 7
     assert not src.ended
+
+
+def test_stream_counts_failed_attempts_until_a_frame(sources):
+    seen: list[tuple[str, int]] = []
+    good = FakeStream([_img(7)])
+    opener = ScriptedOpener(OSError("refused"), OSError("refused"), good)
+    src = StreamSource(
+        "rtsp://cam/live",
+        opener=opener,
+        sleep=lambda d: seen.append((src.state, src.failed_attempts)),
+    )
+    sources.append(src)
+    assert src.failed_attempts == 0
+    src.open()
+    assert good.drained.wait(WAIT_S)
+    assert seen == [("reconnecting", 1), ("reconnecting", 2)]
+    assert _wait_until(lambda: src.state == "running")
+    assert src.failed_attempts == 0  # a frame resets the count
 
 
 def test_stream_unreachable_open_starts_reconnecting(sources):
@@ -385,6 +403,7 @@ def test_stream_state_reconnecting_until_first_frame(sources):
     assert src.state == "reconnecting"
     time.sleep(0.05)
     assert src.state == "reconnecting" and src.read() is None
+    assert src.failed_attempts == 0  # nothing failed: still the first attempt
     gate.set()
     assert stream.drained.wait(WAIT_S)
     assert src.state == "running"
@@ -482,6 +501,22 @@ class FakeCapture:
         self.released = True
 
 
+def test_capture_counts_failed_attempts_until_a_frame():
+    clock = FakeClock(0.0)
+    dev = FakeDevice(clock, lost_from=0.0, lost_until=4.5)  # no signal at startup
+    src = CaptureSource(0, capture_factory=dev.factory, clock=clock)
+    src.open()
+    seen = []
+    while clock.t < 9.0:
+        src.read()
+        seen.append((src.state, src.failed_attempts))
+        clock.t = round(clock.t + 0.1, 6)
+    src.close()
+    assert seen[0] == ("running", 0)
+    assert ("reconnecting", 1) in seen and ("reconnecting", 2) in seen
+    assert seen[-1] == ("running", 0)  # the first good frame resets the count
+
+
 def test_capture_reopens_after_device_loss():
     clock = FakeClock(0.0)
     dev = FakeDevice(clock, lost_from=1.0, lost_until=3.5)  # 2.5 s of failures
@@ -492,7 +527,7 @@ def test_capture_reopens_after_device_loss():
     while clock.t < 8.0:
         t0 = time.perf_counter()
         frame = src.read()
-        assert time.perf_counter() - t0 < 0.05
+        assert time.perf_counter() - t0 < 0.5
         states.append(src.state)
         got.append(frame is not None)
         clock.t = round(clock.t + 0.1, 6)

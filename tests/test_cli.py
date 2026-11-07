@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import socket
@@ -12,9 +13,11 @@ import httpx
 import pytest
 
 import engine.app as app_mod
+from engine.alerts.core import AlertDispatcher
 from engine.app import build_engine, load_dotenv, main
 from engine.config import load_config
 from engine.detectors.fake import FakeDetector
+from engine.events.bus import EventBus
 from tests.conftest import make_video
 
 
@@ -152,6 +155,36 @@ def test_build_engine_closes_source_on_failure(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         build_engine(cfg)
     assert closed
+
+
+def test_build_engine_fails_clips_left_pending_by_a_crash(tmp_path, monkeypatch, caplog):
+    from datetime import datetime, timezone
+
+    from engine.storage import TruckRecord, TruckRepository
+
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    video = make_video(tmp_path / "v.mp4", 5)
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}"))
+    now = datetime.now(timezone.utc)
+    old = TruckRepository(cfg.evidence.data_dir / "sky-eye.db")
+    run_id = old.create_run("old", "{}")
+    stale = [
+        old.insert_truck(TruckRecord(None, run_id, i, now, now, 0.9, clip_status="pending"))
+        for i in range(2)
+    ]
+    saved = old.insert_truck(TruckRecord(None, run_id, 5, now, now, 0.9, clip_status="saved"))
+    old.close()  # an engine that was killed: its clips never finished
+    with caplog.at_level("INFO", logger="engine.app"):
+        ctx = build_engine(cfg)
+    try:
+        assert [ctx.repo.get_truck(i).clip_status for i in stale] == ["failed", "failed"]
+        assert ctx.repo.get_truck(saved).clip_status == "saved"
+        assert any(
+            "2" in r.getMessage() and "pending" in r.getMessage() for r in caplog.records
+        )
+    finally:
+        ctx.pipeline.stop()
+        ctx.repo.close()
 
 
 def test_load_dotenv_does_not_override(tmp_path, monkeypatch):
@@ -345,6 +378,125 @@ def test_clean_stop_closes_repo():
     assert repo_closed == [1] and ctx.shutdown.is_set()
 
 
+def _wait_until(pred, timeout: float = 5.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.01)
+    return pred()
+
+
+class _StuckCloseNotifier:
+    """Delivers at once; close() hangs (e.g. a dead broker) until released."""
+
+    name = "mqtt"
+
+    def __init__(self, release: threading.Event) -> None:
+        self.batches: list = []
+        self._release = release
+
+    def send(self, batch) -> None:
+        self.batches.append(batch)
+
+    def close(self) -> None:
+        self._release.wait(30)
+
+
+def _truck_new(i: int) -> dict:
+    return {"api": 1, "type": "truck.new", "truck": {"id": i}}
+
+
+def test_alerts_shutdown_is_bounded_and_repo_always_closes(caplog):
+    caplog.set_level(logging.INFO)
+    release = threading.Event()
+    notifier = _StuckCloseNotifier(release)
+    bus = EventBus()
+    dispatcher = AlertDispatcher(bus, [notifier], enabled=lambda name: True, cooldown_s=60)
+    repo_closed: list = []
+    ctx = SimpleNamespace(
+        pipeline=SimpleNamespace(stop=lambda: None),
+        repo=SimpleNamespace(close=lambda: repo_closed.append(1)),
+        shutdown=threading.Event(),
+        alerts=dispatcher,
+        notifiers=[notifier],
+    )
+    dispatcher.start()
+    try:
+        bus.publish(_truck_new(1))
+        assert _wait_until(lambda: len(notifier.batches) == 1)
+        bus.publish(_truck_new(2))  # held by the 60 s cooldown
+        assert _wait_until(lambda: len(dispatcher._channels[0].pending) == 1)
+        t0 = time.monotonic()
+        app_mod.shutdown_engine(ctx)
+        took = time.monotonic() - t0
+    finally:
+        release.set()
+        dispatcher.stop(timeout=1.0)
+    assert took < 3.5
+    assert repo_closed == [1]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("dropped 1 held alert" in m for m in messages)
+    stuck = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING and "did not finish" in r.getMessage()
+    ]
+    assert len(stuck) == 1 and "mqtt" in stuck[0]
+    assert "engine stopped" in messages
+
+
+def test_interrupt_inside_alerts_shutdown_still_closes_repo():
+    def interrupted(*a, **k) -> None:
+        raise KeyboardInterrupt
+
+    repo_closed: list = []
+    closed: list = []
+    ctx = SimpleNamespace(
+        pipeline=SimpleNamespace(stop=lambda: None),
+        repo=SimpleNamespace(close=lambda: repo_closed.append(1)),
+        shutdown=threading.Event(),
+        alerts=SimpleNamespace(stop=interrupted),
+        notifiers=[SimpleNamespace(name="desktop", close=lambda: closed.append(1))],
+    )
+    app_mod.shutdown_engine(ctx)
+    assert repo_closed == [1]
+    assert closed == [1]  # the other notifiers are still closed
+
+
+def test_interrupt_while_stopping_alerts_still_closes_repo(monkeypatch):
+    def interrupted(ctx) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(app_mod, "_stop_alerts", interrupted)
+    repo_closed: list = []
+    ctx = SimpleNamespace(
+        pipeline=SimpleNamespace(stop=lambda: None),
+        repo=SimpleNamespace(close=lambda: repo_closed.append(1)),
+        shutdown=threading.Event(),
+        alerts=None,
+        notifiers=[],
+    )
+    # a second Ctrl+C there is swallowed, like during the pipeline stop
+    app_mod.shutdown_engine(ctx)
+    assert repo_closed == [1]
+
+
+def test_failing_alerts_shutdown_still_closes_repo(monkeypatch):
+    def broken(ctx) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(app_mod, "_stop_alerts", broken)
+    repo_closed: list = []
+    ctx = SimpleNamespace(
+        pipeline=SimpleNamespace(stop=lambda: None),
+        repo=SimpleNamespace(close=lambda: repo_closed.append(1)),
+        shutdown=threading.Event(),
+    )
+    with pytest.raises(RuntimeError):
+        app_mod.shutdown_engine(ctx)
+    assert repo_closed == [1]
+
+
 def test_dotenv_inline_comments(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text(
         "SKY_E=value # comment\n"
@@ -471,3 +623,115 @@ def test_stream_credentials_not_stored_or_served(tmp_path, monkeypatch, source_y
     for s in secret:
         assert s not in config_json and s not in body and s not in label
     assert name in body
+
+
+class _FakeNotifier:
+    def __init__(self, name):
+        self.name = name
+        self.closed = 0
+
+    def send(self, batch):
+        pass
+
+    def close(self):
+        self.closed += 1
+
+
+def test_build_engine_starts_and_stops_dispatcher(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok-secret-1")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat-secret-2")
+    monkeypatch.setenv("MQTT_PASSWORD", "pw-secret-3")
+    built: dict = {}
+
+    def fake_telegram(token, chat_id, media_root, dashboard_url=None, **k):
+        built["telegram"] = (token, chat_id, Path(media_root), dashboard_url)
+        return _FakeNotifier("telegram")
+
+    def fake_mqtt(host, port, topic, username, password, tls, **k):
+        built["mqtt"] = (host, port, topic, username, password, tls)
+        built["mqtt_obj"] = _FakeNotifier("mqtt")
+        return built["mqtt_obj"]
+
+    monkeypatch.setattr(app_mod, "TelegramNotifier", fake_telegram)
+    monkeypatch.setattr(app_mod, "MqttNotifier", fake_mqtt)
+    monkeypatch.setattr(app_mod, "DesktopNotifier", lambda: _FakeNotifier("desktop"))
+    video = make_video(tmp_path / "v.mp4", 5)
+    extra = (
+        "alerts:\n  cooldown_s: 3\n  telegram:\n    enabled: true\n"
+        "    dashboard_url: http://box:8000\n"
+        "  mqtt:\n    enabled: true\n    host: broker\n    username: bob\n"
+    )
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}", extra=extra))
+    ctx = build_engine(cfg)
+    try:
+        assert ctx.info["alerts"] == ["desktop", "telegram", "mqtt"]
+        assert ctx.runtime.alerts == {"desktop": True, "telegram": True, "mqtt": True}
+        assert built["telegram"] == (
+            "tok-secret-1", "chat-secret-2", cfg.evidence.data_dir / "media", "http://box:8000")
+        assert built["mqtt"] == ("broker", 1883, "sky-eye/events", "bob", "pw-secret-3", False)
+        assert ctx.alerts is not None
+        assert not ctx.alerts._alive()  # built, not started
+        ctx.alerts.start()
+        assert ctx.alerts._alive()
+    finally:
+        app_mod.shutdown_engine(ctx)
+    assert not ctx.alerts._alive()
+    assert built["mqtt_obj"].closed == 1
+
+
+def test_mqtt_password_ignored_without_username(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    monkeypatch.setenv("MQTT_PASSWORD", "pw-secret-3")
+    seen: dict = {}
+
+    def fake_mqtt(host, port, topic, username, password, tls, **k):
+        seen["password"] = password
+        return _FakeNotifier("mqtt")
+
+    monkeypatch.setattr(app_mod, "MqttNotifier", fake_mqtt)
+    video = make_video(tmp_path / "v.mp4", 5)
+    extra = "alerts:\n  desktop: false\n  mqtt:\n    enabled: true\n"
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}", extra=extra))
+    ctx = build_engine(cfg)
+    try:
+        assert seen["password"] is None
+        assert ctx.runtime.alerts == {"mqtt": True}
+    finally:
+        app_mod.shutdown_engine(ctx)
+
+
+def test_info_never_contains_secrets(tmp_path, monkeypatch):
+    import sqlite3
+
+    from fastapi.testclient import TestClient
+
+    from engine.api.app import create_app
+
+    monkeypatch.setattr(app_mod, "build_detector", lambda cfg: FakeDetector(lambda i: []))
+    secrets = {"TELEGRAM_BOT_TOKEN": "tok-secret-1", "TELEGRAM_CHAT_ID": "chat-secret-2",
+               "MQTT_PASSWORD": "pw-secret-3"}
+    for k, v in secrets.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(app_mod, "TelegramNotifier", lambda *a, **k: _FakeNotifier("telegram"))
+    monkeypatch.setattr(app_mod, "MqttNotifier", lambda *a, **k: _FakeNotifier("mqtt"))
+    video = make_video(tmp_path / "v.mp4", 5)
+    extra = ("alerts:\n  telegram:\n    enabled: true\n"
+             "  mqtt:\n    enabled: true\n    username: bob\n")
+    cfg = load_config(write_config(tmp_path, source=f"  path: {video.as_posix()}", extra=extra))
+    ctx = build_engine(cfg)
+    try:
+        with TestClient(create_app(ctx)) as client:
+            bodies = [client.get("/api/info").text, client.get("/api/config/runtime").text]
+        db = sqlite3.connect(cfg.evidence.data_dir / "sky-eye.db")
+        try:
+            rows = db.execute("SELECT config_json FROM runs").fetchall()
+        finally:
+            db.close()
+        assert rows
+        bodies += [r[0] for r in rows]
+        for body in bodies:
+            for value in secrets.values():
+                assert value not in body
+    finally:
+        app_mod.shutdown_engine(ctx)

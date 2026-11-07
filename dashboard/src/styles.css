@@ -42,6 +42,7 @@
                      .dialog-title, .dialog-actions
     .field           labelled control: .field-label, .field-hint, .field-error;
                      .input for text, password and date inputs; range inputs styled too
+    .switch          label wrapping a role="switch" checkbox and its name
     .facts           <dl> of label/value pairs
     .stream          16:9 black video frame; .stream-message overlays text on it;
                      .stream--bleed spans the full screen width on phones (only as a
@@ -718,6 +719,22 @@ a {
 input[type="range"] {
   width: 100%;
   min-height: var(--tap);
+  margin: 0;
+  accent-color: var(--text);
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--tap);
+  font-weight: 600;
+}
+
+.switch input[type="checkbox"] {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
   margin: 0;
   accent-color: var(--text);
 }

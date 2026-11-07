@@ -32,6 +32,7 @@ class CaptureSource:
     was unplugged) the device is released, state turns "reconnecting", and
     read() reopens it after 1, 2, 4 ... 30 s, returning None in between
     without waiting. The first good frame makes it "running" again.
+    failed_attempts counts those losses and failed reopens since the last frame.
     """
 
     def __init__(
@@ -53,6 +54,7 @@ class CaptureSource:
         self._state = "running"
         self._failing_since: float | None = None
         self._retry_at = 0.0
+        self._failed_attempts = 0
 
     def open(self) -> None:
         cap = self._factory(self._device)
@@ -66,6 +68,7 @@ class CaptureSource:
         self._start = self._clock()
         self._state = "running"
         self._failing_since = None
+        self._failed_attempts = 0
         self._backoff.reset()
         self._opened = True
 
@@ -83,6 +86,7 @@ class CaptureSource:
             self._on_failure(now)
             return None
         self._failing_since = None
+        self._failed_attempts = 0
         if self._state != "running":
             self._state = "running"
             self._backoff.reset()
@@ -116,6 +120,11 @@ class CaptureSource:
     def state(self) -> str:
         return self._state
 
+    @property
+    def failed_attempts(self) -> int:
+        """Device losses and failed reopens since the last frame (0 = none)."""
+        return self._failed_attempts
+
     # ----- reconnect -----
 
     def _on_failure(self, now: float) -> None:
@@ -125,6 +134,7 @@ class CaptureSource:
             return
         self._release()
         self._failing_since = None
+        self._failed_attempts += 1
         delay = self._schedule_retry(now)
         if self._state == "running":
             log.warning("capture device %d: no frames for %g s; reconnecting in %g s",
@@ -145,6 +155,7 @@ class CaptureSource:
         if not opened:
             if cap is not None:
                 cap.release()
+            self._failed_attempts += 1
             delay = self._schedule_retry(now)
             log.info("capture device %d not available; next try in %g s", self._device, delay)
             return False

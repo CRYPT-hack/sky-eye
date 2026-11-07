@@ -174,8 +174,10 @@ Each block is created from config by a small factory (`build_source(cfg)`, `buil
 |---|---|---|
 | `file` | OpenCV | Optional `realtime: true` paces playback to the file's FPS so tests feel live |
 | `capture` | OpenCV (`CAP_DSHOW` on Windows) | Webcam or USB HDMI capture card (device index) |
-| `stream` | PyAV (FFmpeg) | `rtsp://`, `rtmp://`, `srt://`, `udp://`. Low-latency flags. Auto-reconnect with backoff (1 s → 30 s max) |
+| `stream` | PyAV (FFmpeg) | `rtsp://`, `rtmp://`, `udp://`, `http(s)://` (`srt://` is relayed through `go2rtc`). Low-latency flags. Auto-reconnect with backoff (1 s → 30 s max) |
 | `go2rtc` | stream via local go2rtc | For drone streams that need protocol conversion |
+
+> **Shipped in Plan 3:** `stream` accepts `rtsp`, `rtsps`, `rtmp`, `rtmps`, `udp`, `http` and `https`; `srt://` is rejected with a hint to relay it through `go2rtc` (the PyAV wheels have no libsrt). `go2rtc` reads the local server's RTSP output (`go2rtc.name`, `go2rtc.rtsp_base`). While a stream is down `source_state` is `reconnecting`.
 
 ### 5.2 Detector
 
@@ -228,6 +230,8 @@ ByteTrack via Roboflow's `trackers` package (Apache-2.0; supervision 0.31 no lon
 
 - **Cooldown:** at most one alert per channel every `cooldown_s` seconds (default 10). Extra trucks in that window are grouped ("3 new trucks").
 - A failing channel logs an error and retries 3× with backoff. It never stops detection.
+
+> **Shipped in Plan 3:** MQTT delivery is at-least-once (QoS 1), so subscribers must tolerate duplicates. Each channel has a runtime on/off switch (Status page and `PUT /api/config/runtime`), reset on restart, plus `POST /api/alerts/test`. Each truck carries `clip_status` (`pending`, `saved`, `skipped`, `failed`, `removed`) so alerts and the website can say why a clip is missing.
 
 ### 5.7 Engine API (the contract the dashboard uses)
 
