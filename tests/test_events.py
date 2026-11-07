@@ -533,8 +533,8 @@ def test_truck_gets_location_from_pose(tmp_path):
         rig.feed(0, 0.0, result(0.8))
         rec = rig.repo.get_truck(1)
         assert rec.geo_status == "ok"
-        assert rec.lat is not None and abs(rec.lat - 48.0) < 0.01
-        assert rec.lon is not None and abs(rec.lon - 11.0) < 0.01
+        assert rec.lat is not None and 48.0 < rec.lat < 48.01  # yaw 0: north of the drone
+        assert rec.lon is not None and abs(rec.lon - 11.0) < 0.001
         assert rec.geo_error_m is not None and rec.geo_error_m > 0
         (new,) = [m for m in drain(rig.q) if m["type"] == "truck.new"]
         assert new["truck"]["geo_status"] == "ok" and new["truck"]["lat"] == rec.lat
@@ -606,5 +606,42 @@ def test_telemetry_failure_never_breaks_detection(tmp_path, caplog):
         assert rig.repo.get_truck(1).geo_status == "unknown"
         assert "secret-connection-string" not in caplog.text
         assert "RuntimeError" in caplog.text
+    finally:
+        rig.close()
+
+
+def test_telemetry_failure_logs_are_rate_limited(tmp_path, caplog, monkeypatch):
+    import engine.events.manager as mgr_mod
+
+    class Boom(FakeTelemetry):
+        def pose_for(self, frame):
+            raise RuntimeError("secret-connection-string")
+
+    clock = [100.0]
+    monkeypatch.setattr(mgr_mod.time, "monotonic", lambda: clock[0])
+    rig = Rig(tmp_path, telemetry=Boom())
+    try:
+        with caplog.at_level(logging.WARNING, logger="engine.events.manager"):
+            for i in range(50):
+                rig.feed(i, i / 10, result(None))
+            assert len(caplog.records) == 1  # the first failure only
+            clock[0] += 11.0
+            rig.feed(50, 5.0, result(None))
+        assert len(caplog.records) == 2
+        assert "50 more" in caplog.records[1].getMessage()
+        assert "secret-connection-string" not in caplog.text
+    finally:
+        rig.close()
+
+
+def test_better_snapshot_is_one_database_write(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, telemetry=FakeTelemetry(POSE_DOWN))
+    try:
+        rig.feed(0, 0.0, result(0.6))
+        calls = []
+        real = rig.repo.update_truck
+        monkeypatch.setattr(rig.repo, "update_truck", lambda *a, **k: (calls.append(k), real(*a, **k)))
+        rig.feed(1, 0.5, result(0.9))
+        assert len(calls) == 1 and calls[0]["best_score"] == 0.9 and "lat" in calls[0]
     finally:
         rig.close()

@@ -128,6 +128,12 @@ def _config_json(cfg: AppConfig) -> str:
     if source.get("url"):
         source["url"] = redact_url(source["url"])
     source["go2rtc"]["rtsp_base"] = redact_url(source["go2rtc"]["rtsp_base"])
+    tel = data["telemetry"]
+    conn = str(tel.get("connection") or "")
+    # the link may carry credentials or addresses: keep only its kind
+    tel["connection"] = conn.split(":", 1)[0].lower() if conn[:3].lower() == "udp" else "serial"
+    if tel.get("srt_path"):
+        tel["srt_path"] = Path(tel["srt_path"]).name
     return json.dumps(data, separators=(",", ":"))
 
 

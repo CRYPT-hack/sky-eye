@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from engine.telemetry import DronePose, NoTelemetry, Telemetry
 
 log = logging.getLogger(__name__)
 
+_TELEMETRY_LOG_S = 10.0  # repeated telemetry failures: one summary per this period
 _HEARTBEAT_S = 5.0  # an active truck's last_seen is refreshed at most this often (frame time)
 
 
@@ -88,6 +90,9 @@ class EventManager:
         telemetry: Telemetry | None = None,
         hfov_deg: float = 82.0,
     ) -> None:
+        self._tel_log_lock = threading.Lock()
+        self._tel_logged_at: float | None = None
+        self._tel_suppressed = 0
         self._telemetry: Telemetry = telemetry if telemetry is not None else NoTelemetry()
         self._hfov_deg = hfov_deg
         self._repo = repo
@@ -120,12 +125,29 @@ class EventManager:
         if rec is not None:
             self._bus.publish({"api": 1, "type": kind, "truck": truck_to_json(rec)})
 
+    def _log_telemetry_failure(self, what: str, exc: Exception) -> None:
+        """The first failure at once, then at most one summary per _TELEMETRY_LOG_S.
+        Only the exception type is logged (its text may hold a connection string)."""
+        now = time.monotonic()
+        with self._tel_log_lock:
+            if self._tel_logged_at is None:
+                self._tel_logged_at = now
+                log.warning("telemetry %s failed: %s", what, type(exc).__name__)
+                return
+            self._tel_suppressed += 1
+            if now - self._tel_logged_at < _TELEMETRY_LOG_S:
+                return
+            count, self._tel_suppressed, self._tel_logged_at = self._tel_suppressed, 0, now
+        log.warning(
+            "telemetry %s failed %d more time(s) (latest: %s)", what, count, type(exc).__name__
+        )
+
     def _pose_for(self, frame: Frame) -> DronePose | None:
         # every frame, even without trucks: a recorded flight's "latest" follows playback
         try:
             return self._telemetry.pose_for(frame)
         except Exception as exc:  # noqa: BLE001 - telemetry must never break detection
-            log.warning("telemetry pose lookup failed: %s", type(exc).__name__)
+            self._log_telemetry_failure("pose lookup", exc)
             return None
 
     def _geo(self, frame: Frame, box, pose: DronePose | None) -> GeoFix:
@@ -133,7 +155,7 @@ class EventManager:
             h, w = frame.image.shape[:2]
             return geolocate(box, (w, h), pose, self._hfov_deg)
         except Exception as exc:  # noqa: BLE001 - telemetry must never break detection
-            log.warning("geolocation failed: %s", type(exc).__name__)
+            self._log_telemetry_failure("geolocation", exc)
             return GeoFix(None, None, None, "unknown")
 
     def on_frame(self, frame: Frame, result: TrackerResult) -> None:
@@ -167,18 +189,18 @@ class EventManager:
                             )
                             continue
                         state.best_score = score
-                        self._repo.update_truck(state.truck_id, best_score=score)
+                        fields: dict[str, object] = {"best_score": score}
                         fix = self._geo(frame, track.detection.box, pose)
                         # never replace a good location by a worse one
                         if fix.status == "ok" or state.geo_status != "ok":
                             state.geo_status = fix.status
-                            self._repo.update_truck(
-                                state.truck_id,
+                            fields.update(
                                 lat=fix.lat,
                                 lon=fix.lon,
                                 geo_error_m=fix.error_m,
                                 geo_status=fix.status,
                             )
+                        self._repo.update_truck(state.truck_id, **fields)
                         if state.truck_id not in improved:
                             improved.append(state.truck_id)
                 ended = [self._active.pop(t) for t in result.ended_ids if t in self._active]

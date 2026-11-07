@@ -661,6 +661,29 @@ def test_telemetry_ws_silent_without_telemetry(client):
     assert types == ["status", "status"]
 
 
+def test_telemetry_ws_gated_by_type_none(tmp_path):
+    # a pose exists but telemetry is switched off: no telemetry message is ever sent
+    tel = FakeTelemetry(_poses(1)[0])
+    rig, client = _tel_client(tmp_path, tel, "none")
+    try:
+        with client, client.websocket_connect("/ws") as ws:
+            types = [ws.receive_json()["type"] for _ in range(2)]
+        assert types == ["status", "status"]
+    finally:
+        rig.repo.close()
+
+
+def test_telemetry_ws_unchanged_pose_sent_once(tmp_path):
+    tel = FakeTelemetry(_poses(1)[0])
+    rig, client = _tel_client(tmp_path, tel)
+    try:
+        with client, client.websocket_connect("/ws") as ws:
+            types = [ws.receive_json()["type"] for _ in range(4)]  # >= 2 status ticks
+        assert types.count("telemetry") == 1 and types.count("status") >= 2
+    finally:
+        rig.repo.close()
+
+
 def test_telemetry_t_iso_null_for_srt(tmp_path):
     tel = FakeTelemetry(_poses(1)[0], track=_poses(1))
     rig, client = _tel_client(tmp_path, tel, "dji_srt")

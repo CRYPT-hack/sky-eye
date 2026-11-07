@@ -20,6 +20,7 @@ from engine.telemetry import NoTelemetry, Telemetry
 
 log = logging.getLogger(__name__)
 
+_TELEMETRY_STOP_S = 2.0  # at most this long is spent waiting for telemetry.stop()
 _QUEUE_SIZE = 8  # realtime=False: capture may run this many frames ahead
 _RETRY_S = 0.005  # read() gave None but the source has not ended (live device)
 _FPS_WINDOW_S = 2.0
@@ -194,6 +195,8 @@ class Pipeline:
         with self._lifecycle:
             never_started = not self._started
             self._started = True  # a stopped pipeline cannot be started
+        # the telemetry stops in parallel with the threads: it can take ~1.5 s
+        telemetry_stopper = self._begin_telemetry_stop()
         self._stop_event.set()
         self._channel.cancel()
         self._recorder.abort()
@@ -204,12 +207,28 @@ class Pipeline:
         for thread in (self._capture_thread, self._infer_thread):
             if thread is not None and thread is not threading.current_thread():
                 thread.join()
-        if self._telemetry_started:
+        if telemetry_stopper is not None:
+            telemetry_stopper.join(_TELEMETRY_STOP_S)
+            if telemetry_stopper.is_alive():
+                log.warning(
+                    "telemetry did not stop within %.0f s; continuing", _TELEMETRY_STOP_S
+                )
+
+    def _begin_telemetry_stop(self) -> threading.Thread | None:
+        with self._lifecycle:
+            if not self._telemetry_started:
+                return None
             self._telemetry_started = False
+
+        def run() -> None:
             try:
                 self._telemetry.stop()
             except Exception as exc:  # noqa: BLE001 - never block the shutdown
                 log.warning("telemetry did not stop cleanly: %s", type(exc).__name__)
+
+        thread = threading.Thread(target=run, name="sky-eye-telemetry-stop", daemon=True)
+        thread.start()
+        return thread
 
     def wait(self, timeout: float | None = None) -> bool:
         """True once the pipeline has finished (events closed, clips written).

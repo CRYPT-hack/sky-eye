@@ -85,12 +85,23 @@ class DjiSrtTelemetry:
         self._loop = loop
         self._buffer = PoseBuffer(max_age_s)
         self._period = 0.0
-        self._started = False
+        self._started = False  # parsing finished
+        self._loader: threading.Thread | None = None
         self._count = 0
         self._last_t: float | None = None
         self._lock = threading.Lock()
 
     def start(self) -> None:
+        """Parse the file on a helper thread; state stays "waiting" until it is done."""
+        with self._lock:
+            if self._loader is not None:
+                return
+            self._loader = threading.Thread(
+                target=self._load, name="sky-eye-srt-load", daemon=True
+            )
+        self._loader.start()
+
+    def _load(self) -> None:
         poses: list[DronePose] = []
         period = 0.0
         try:
@@ -106,7 +117,9 @@ class DjiSrtTelemetry:
             self._started = True
 
     def stop(self) -> None:
-        pass
+        loader = self._loader
+        if loader is not None and loader is not threading.current_thread():
+            loader.join(1.0)
 
     def pose_for(self, frame: Frame) -> DronePose | None:
         t = frame.ts
