@@ -56,3 +56,17 @@ api:
     mode: none          # none | token (token needs SKYEYE_API_TOKEN in .env/env)
   stream_fps: 15
   stream_max_width: 1280
+  map_tile_url: https://tile.openstreetmap.org/{z}/{x}/{y}.png   # needs {z} {x} {y}
+
+# Truck locations on a map (see README "GPS & map"). Default: no telemetry.
+camera:
+  hfov_deg: 82.0        # horizontal field of view of the video, in degrees
+
+telemetry:
+  type: none            # none | mavlink | dji_srt
+  # type: dji_srt - recorded flights (source.type: file); the .SRT next to the video is used
+  #   srt_path: samples/drone.SRT
+  # type: mavlink - PX4 / ArduPilot, UDP or serial only (listens, never sends commands)
+  #   connection: "udpin:0.0.0.0:14550"     # serial radio: "COM5,57600"
+  max_age_s: 0.5        # a drone reading must be this close to the video frame
+  stale_after_s: 2.0    # type: mavlink - no new reading for this long = telemetry lost

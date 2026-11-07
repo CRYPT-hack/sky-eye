@@ -158,6 +158,82 @@ nothing arrives, the engine log says why (for example a wrong chat id or an
 unreachable broker). A failing channel is retried a few times and never stops
 detection.
 
+## GPS & map
+
+With the drone's position, height and camera angle (together called **telemetry**),
+sky-eye works out where each truck stands on the ground and shows it on the website's
+Map page and as a map link in Telegram alerts. Without telemetry everything else works
+as before, and trucks show "Location: Unknown".
+
+**DJI drones (recorded flights)**
+
+1. In the DJI app (DJI Fly / DJI GO) turn on the flight-log subtitles: the setting is
+   called "Video Caption" or "Video Subtitles". The drone then writes a `.SRT` file
+   next to every video.
+2. Keep the `.SRT` next to the video with the same name (`flight.MP4` and `flight.SRT`).
+3. Set it up in `config.yaml`:
+
+   ```yaml
+   source:
+     type: file
+     path: samples/flight.MP4
+   telemetry:
+     type: dji_srt     # srt_path is optional: the .SRT next to the video is found by itself
+   ```
+
+   `telemetry.srt_path` is only needed when the file lives somewhere else. This works
+   for `source.type: file` only. Older DJI logs that have no gimbal (camera) angles are
+   treated as looking straight down.
+
+**PX4 / ArduPilot drones (live)**
+
+sky-eye only listens to the flight controller (MAVLink is the protocol they speak);
+it never sends commands to the drone.
+
+- Let your ground-station program (QGroundControl or Mission Planner) forward MAVLink
+  to UDP port 14550 on the laptop, or point a telemetry radio or a companion computer
+  at it.
+- In `config.yaml`:
+
+  ```yaml
+  telemetry:
+    type: mavlink
+    connection: "udpin:0.0.0.0:14550"   # listen on UDP port 14550
+  ```
+
+  A serial telemetry radio works too, for example `connection: "COM5,57600"` (port,
+  speed; on Linux `/dev/ttyUSB0,57600`). Only UDP and serial links are accepted.
+- ArduPilot: if nothing arrives, the telemetry stream rates (the `SRx_*` parameters)
+  may be 0; set them in your ground station.
+- Allow Python through the Windows firewall on **Private** networks for UDP 14550.
+
+**Camera field of view.** The calculation needs the horizontal field of view (how wide
+the camera sees, in degrees) of the video:
+
+```yaml
+camera:
+  hfov_deg: 82      # default
+```
+
+Look the value up in your drone's spec sheet; typical wide cameras are around 70 to 85
+degrees (for example 82 to 84 for many DJI models; the spec sheet usually gives the
+diagonal field of view, so check which one it is). A zoomed or cropped video needs the
+matching, smaller value.
+
+**How accurate is it?** The calculation assumes flat ground at the height the drone
+took off from, so hills, buildings and a wrong field of view all add error. Each
+location comes with an **error circle** (the website draws it around the point). When the
+camera looks close to the horizon (less than about 5 degrees below it) or the error
+would be over 200 m, the location is marked unreliable and shown without an exact
+point. The drone's reading has to be within 0.5 s of the video frame (`telemetry.max_age_s`)
+for a location to be computed; otherwise the truck stays "Unknown".
+
+**Map page.** It uses OpenStreetMap tiles, which need internet. Offline, the page still
+shows the points on a blank background with a notice. To use another tile server, set
+`api.map_tile_url` (it must contain `{z}`, `{x}` and `{y}`). OpenStreetMap's tile
+servers are for light use only; see their tile usage policy before you leave the map
+open all day or share the website widely.
+
 ## Dashboard
 
 The website in `dashboard/` (React + TypeScript, built with Vite) shows the live
