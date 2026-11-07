@@ -257,3 +257,111 @@ def test_telegram_enabled_requires_env(tmp_path, monkeypatch):
         load_config(_write(tmp_path, text))
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
     assert load_config(_write(tmp_path, text)).alerts.telegram.enabled is True
+
+
+# --- telemetry / camera / map tiles ---
+
+def test_telemetry_defaults(tmp_path):
+    cfg = load_config(_write(tmp_path, "{}"))
+    assert cfg.telemetry.type == "none"
+    assert cfg.telemetry.connection == "udpin:0.0.0.0:14550"
+    assert cfg.telemetry.srt_path is None
+    assert cfg.telemetry.max_age_s == 0.5 and cfg.telemetry.stale_after_s == 2.0
+    assert cfg.camera.hfov_deg == 82.0
+    assert cfg.api.map_tile_url == "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+
+
+@pytest.mark.parametrize(
+    "body, field",
+    [
+        ("telemetry:\n  max_age_s: 0\n", r"telemetry\.max_age_s"),
+        ("telemetry:\n  stale_after_s: -1\n", r"telemetry\.stale_after_s"),
+        ("camera:\n  hfov_deg: 5\n", r"camera\.hfov_deg"),
+        ("camera:\n  hfov_deg: 171\n", r"camera\.hfov_deg"),
+        ("telemetry:\n  type: gps\n", r"telemetry\.type"),
+    ],
+)
+def test_telemetry_camera_bounds(tmp_path, body, field):
+    with pytest.raises(ConfigError, match=field):
+        load_config(_write(tmp_path, body))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://t/{z}/{x}/{y}.png",
+        "tile.example.com/{z}/{x}/{y}.png",
+        "https://t.example.com/{z}/{x}.png",
+        "https://t.example.com/{x}/{y}.png",
+    ],
+)
+def test_map_tile_url_rejected(tmp_path, url):
+    with pytest.raises(ConfigError, match=r"api\.map_tile_url"):
+        load_config(_write(tmp_path, f'api:\n  map_tile_url: "{url}"\n'))
+
+
+def test_map_tile_url_accepts_http(tmp_path):
+    cfg = load_config(_write(tmp_path, 'api:\n  map_tile_url: "http://localhost/{z}/{x}/{y}.png"\n'))
+    assert cfg.api.map_tile_url.startswith("http://localhost")
+
+
+def _video(tmp_path: Path, name: str = "flight.mp4") -> Path:
+    v = tmp_path / name
+    v.write_bytes(b"x")
+    return v
+
+
+def test_dji_srt_requires_file_source(tmp_path):
+    p = _write(tmp_path, "source:\n  type: capture\ntelemetry:\n  type: dji_srt\n")
+    with pytest.raises(ConfigError, match=r"telemetry.*file"):
+        load_config(p)
+
+
+@pytest.mark.parametrize("suffix", [".SRT", ".srt", ".Srt"])
+def test_dji_srt_default_finds_sibling(tmp_path, suffix):
+    _video(tmp_path)
+    srt = tmp_path / f"flight{suffix}"
+    srt.write_text("x")
+    p = _write(tmp_path, "source:\n  path: flight.mp4\ntelemetry:\n  type: dji_srt\n")
+    cfg = load_config(p)
+    assert cfg.telemetry.srt_path is not None
+    assert cfg.telemetry.srt_path.name == srt.name
+
+
+def test_dji_srt_default_missing_names_field(tmp_path):
+    _video(tmp_path)
+    p = _write(tmp_path, "source:\n  path: flight.mp4\ntelemetry:\n  type: dji_srt\n")
+    with pytest.raises(ConfigError, match=r"telemetry\.srt_path"):
+        load_config(p)
+
+
+def test_dji_srt_without_source_path_names_field(tmp_path):
+    p = _write(tmp_path, "telemetry:\n  type: dji_srt\n")
+    with pytest.raises(ConfigError, match=r"telemetry\.srt_path"):
+        load_config(p)
+
+
+def test_dji_srt_explicit_relative_path_resolves_to_config_dir(tmp_path):
+    _video(tmp_path)
+    (tmp_path / "other.srt").write_text("x")
+    p = _write(
+        tmp_path,
+        "source:\n  path: flight.mp4\ntelemetry:\n  type: dji_srt\n  srt_path: other.srt\n",
+    )
+    cfg = load_config(p)
+    assert cfg.telemetry.srt_path == tmp_path.resolve() / "other.srt"
+
+
+def test_dji_srt_explicit_missing_rejected(tmp_path):
+    _video(tmp_path)
+    p = _write(
+        tmp_path,
+        "source:\n  path: flight.mp4\ntelemetry:\n  type: dji_srt\n  srt_path: nope.srt\n",
+    )
+    with pytest.raises(ConfigError, match=r"telemetry\.srt_path"):
+        load_config(p)
+
+
+def test_srt_path_ignored_for_other_types(tmp_path):
+    cfg = load_config(_write(tmp_path, "telemetry:\n  type: mavlink\n  srt_path: nope.srt\n"))
+    assert cfg.telemetry.type == "mavlink"
