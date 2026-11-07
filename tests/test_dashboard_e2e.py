@@ -152,7 +152,23 @@ def test_built_site_served_by_live_engine(tmp_path, monkeypatch):
             # alerts: the one truck gives exactly one batch carrying its id
             truck_id = new_truck["truck"]["id"]
             assert _wait_for(lambda: len(fake.batches) >= 1, 5)
-            time.sleep(0.5)  # a duplicate would show up by now
+            # let the whole video play out, counting every truck.new on the bus:
+            # a second one would be held by the dispatcher for the cooldown
+            # and so never show up as a delivered batch within a short wait
+            new_msgs = [new_truck]
+            ended = False
+            end = time.time() + 30
+            while time.time() < end and not ended:
+                try:
+                    msg = json.loads(ws.recv(timeout=2))
+                except TimeoutError:
+                    continue
+                if msg["type"] == "truck.new":
+                    new_msgs.append(msg)
+                elif msg["type"] == "status" and msg["status"]["source_state"] == "ended":
+                    ended = True
+            assert ended, "video did not end within 30 s"
+            assert [m["truck"]["id"] for m in new_msgs] == [truck_id]
             real = [b for b in fake.batches if not b.is_test]
             assert len(real) == 1
             assert [t["id"] for t in real[0].trucks] == [truck_id]

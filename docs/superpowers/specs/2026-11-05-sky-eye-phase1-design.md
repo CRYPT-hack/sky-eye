@@ -174,7 +174,7 @@ Each block is created from config by a small factory (`build_source(cfg)`, `buil
 |---|---|---|
 | `file` | OpenCV | Optional `realtime: true` paces playback to the file's FPS so tests feel live |
 | `capture` | OpenCV (`CAP_DSHOW` on Windows) | Webcam or USB HDMI capture card (device index) |
-| `stream` | PyAV (FFmpeg) | `rtsp://`, `rtmp://`, `srt://`, `udp://`. Low-latency flags. Auto-reconnect with backoff (1 s → 30 s max) |
+| `stream` | PyAV (FFmpeg) | `rtsp://`, `rtmp://`, `udp://`, `http(s)://` (`srt://` is relayed through `go2rtc`). Low-latency flags. Auto-reconnect with backoff (1 s → 30 s max) |
 | `go2rtc` | stream via local go2rtc | For drone streams that need protocol conversion |
 
 > **Shipped in Plan 3:** `stream` accepts `rtsp`, `rtsps`, `rtmp`, `rtmps`, `udp`, `http` and `https`; `srt://` is rejected with a hint to relay it through `go2rtc` (the PyAV wheels have no libsrt). `go2rtc` reads the local server's RTSP output (`go2rtc.name`, `go2rtc.rtsp_base`). While a stream is down `source_state` is `reconnecting`.

@@ -54,9 +54,20 @@ the website's Status page shows the source state.
 - **HDMI capture card (works with any drone):** plug the controller's HDMI out into a
   USB capture card and use `type: capture` with `device: 0` (try 1, 2, ... if you
   have several cameras).
-- **DJI apps:** most DJI apps can push RTMP live to a server. Run
-  [go2rtc](https://github.com/AlexxIT/go2rtc) or MediaMTX on the laptop (both free),
-  point the DJI app's "RTMP custom" at `rtmp://<laptop-ip>:1935/live/drone`, then use:
+- **DJI apps:** if your DJI app offers live streaming to a custom RTMP server, point
+  its "RTMP custom" option at `rtmp://<laptop-ip>:1935/live/drone`. Run a free relay on
+  the laptop to receive it, for example MediaMTX listening on port 1935, with
+  [go2rtc](https://github.com/AlexxIT/go2rtc) pulling from it. In `go2rtc.yaml` the
+  stream must be named `drone` so the config below connects:
+
+  ```yaml
+  streams:
+    drone: rtmp://127.0.0.1:1935/live/drone
+  ```
+
+  Both tools use RTSP port 8554 by default, so change one of them if they run
+  together. go2rtc can also accept an RTMP publish itself; see its README for the
+  exact settings. Then use:
 
   ```yaml
   source:
@@ -83,7 +94,9 @@ the website's Status page shows the source state.
 
 **Reconnecting** means the stream stopped delivering frames (Wi-Fi drop, drone out of
 range, encoder restart). The engine keeps running and retries with a growing delay;
-the website shows a "Reconnecting" banner and detection resumes by itself when
+the website shows a "Drone video lost — reconnecting…" banner (the status label reads
+"Reconnecting"; the separate "Reconnecting to the engine…" banner means the browser lost
+its link to the engine, not the drone) and detection resumes by itself when
 frames return.
 
 ## Alerts
