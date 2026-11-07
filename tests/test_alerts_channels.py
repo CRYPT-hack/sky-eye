@@ -145,6 +145,65 @@ def test_token_redacted_in_logs_and_errors(tmp_path, caplog):
     assert TOKEN not in caplog.text
 
 
+class SkyLogs:
+    def __init__(self, path, console):
+        self.path, self._console = path, console
+
+    def texts(self) -> list[str]:
+        """What reached the console and the rotating log file."""
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        return [self._console.getvalue(), self.path.read_text(encoding="utf-8")]
+
+
+@pytest.fixture
+def sky_logging(tmp_path):
+    """The engine's own logging setup into tmp, console captured; undone afterwards."""
+    import io
+
+    from engine.logging_setup import setup_logging
+
+    root = logging.getLogger()
+    saved = {n: logging.getLogger(n).level for n in ("httpx", "httpcore")}
+    root_level = root.level
+    path = setup_logging(tmp_path / "data")
+    console = io.StringIO()
+    for handler in root.handlers:
+        if getattr(handler, "_sky_eye", False) and not isinstance(handler, logging.FileHandler):
+            handler.setStream(console)
+    yield SkyLogs(path, console)
+    for handler in list(root.handlers):
+        if getattr(handler, "_sky_eye", False):
+            root.removeHandler(handler)
+            handler.close()
+    for name, level in saved.items():
+        logging.getLogger(name).setLevel(level)
+    root.setLevel(root_level)
+
+
+def test_successful_send_never_logs_token(tmp_path, sky_logging, caplog):
+    caplog.set_level(logging.INFO)
+    seen, handler = recorder()
+    make_tg(tmp_path, handler).send(AlertBatch((truck(),)))
+    assert len(seen) == 1
+    for text in [caplog.text, *sky_logging.texts()]:
+        assert TOKEN not in text and "SECRET-token" not in text
+
+
+def test_log_handlers_redact_bot_tokens(sky_logging):
+    logging.getLogger("x").info("https://api.telegram.org/bot123:ABC/x")
+    logging.getLogger("x").warning("failed: %s", "https://api.telegram.org/bot99:A-b_c/sendPhoto")
+    try:
+        raise RuntimeError("POST https://api.telegram.org/bot7:Zz9/sendMessage")
+    except RuntimeError:
+        logging.getLogger("x").exception("boom")
+    for text in sky_logging.texts():
+        assert "https://api.telegram.org/bot***/x" in text
+        assert "https://api.telegram.org/bot***/sendPhoto" in text
+        assert "bot***/sendMessage" in text
+        assert "123:ABC" not in text and "99:A-b_c" not in text and "7:Zz9" not in text
+
+
 def test_telegram_http_error_redacted(tmp_path):
     def handler(request):
         return httpx.Response(401, text=f"bad bot{TOKEN}")
