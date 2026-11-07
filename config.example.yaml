@@ -3,7 +3,7 @@ source:
   type: file            # file | capture | stream | go2rtc
   path: samples/drone.mp4
   device: 0             # type: capture - capture device index (HDMI capture card, webcam)
-  # type: stream - rtsp, rtsps, rtmp, rtmps, udp, http or https URL (srt: use go2rtc)
+  # type: stream - rtsp, rtsps, rtmp, rtmps, udp, http or https URL (srt: via MediaMTX)
   #   url: rtsp://192.168.1.20:8554/live
   # type: go2rtc - a stream of a local go2rtc server, read from its RTSP output
   #   go2rtc:

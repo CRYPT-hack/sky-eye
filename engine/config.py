@@ -33,7 +33,10 @@ def _url_problem(url: str, schemes: tuple[str, ...]) -> str | None:
     if "://" not in url or not parts.scheme:
         return f"needs a scheme, one of: {', '.join(schemes)} (e.g. {schemes[0]}://host/path)"
     if parts.scheme == "srt":  # the PyAV wheels are built without libsrt
-        return "SRT is not supported directly; relay it through go2rtc (type: go2rtc)"
+        return (
+            "SRT is not supported directly; "
+            "let a relay such as MediaMTX ingest it and read its RTSP output"
+        )
     if parts.scheme not in schemes:
         return f"unsupported scheme {parts.scheme!r}; use one of: {', '.join(schemes)}"
     # urlsplit ends the authority at the first / ? or #; an "@" after that means

@@ -140,7 +140,8 @@ class StreamSource:
 
     state is "reconnecting" from open() until a frame arrives, then "running";
     failed_attempts counts the connection attempts that failed since the last
-    frame (0 while the first attempt is still connecting). The source never ends: on a connect failure, a read error, the stream
+    frame (0 while the first attempt is still connecting). The source never
+    ends: on a connect failure, a read error, the stream
     ending or no frame for `read_timeout_s` (for the first frame of a
     connection: max(read_timeout_s, open_timeout_s), so a long-GOP camera can
     reach its first keyframe), state turns "reconnecting" again and the thread

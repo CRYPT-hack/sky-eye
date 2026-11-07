@@ -476,7 +476,8 @@ def test_interrupt_while_stopping_alerts_still_closes_repo(monkeypatch):
         alerts=None,
         notifiers=[],
     )
-    app_mod.shutdown_engine(ctx)  # a second Ctrl+C there is swallowed, like during the pipeline stop
+    # a second Ctrl+C there is swallowed, like during the pipeline stop
+    app_mod.shutdown_engine(ctx)
     assert repo_closed == [1]
 
 

@@ -159,7 +159,8 @@ def test_telegram_nested_crop_path_still_sent(tmp_path):
     d.mkdir(parents=True)
     (d / "x_crop.jpg").write_bytes(b"\xff\xd8JPEG")
     seen, handler = recorder()
-    make_tg(tmp_path, handler).send(AlertBatch((truck(crop="/media/2026-11-06/sub/x_crop.jpg?v=1"),)))
+    crop = "/media/2026-11-06/sub/x_crop.jpg?v=1"
+    make_tg(tmp_path, handler).send(AlertBatch((truck(crop=crop),)))
     assert seen[0].url.path.endswith("/sendPhoto")
 
 

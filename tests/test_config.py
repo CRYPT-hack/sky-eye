@@ -193,12 +193,12 @@ def test_source_config_stream_and_go2rtc(tmp_path):
         build_source(SourceConfig.model_construct(type="go2rtc"))
 
 
-def test_stream_srt_points_to_go2rtc(tmp_path):
+def test_stream_srt_points_to_a_relay(tmp_path):
     # the PyAV wheels have no libsrt
     with pytest.raises(
         ConfigError,
         match=r"source\.url: SRT is not supported directly; "
-        r"relay it through go2rtc \(type: go2rtc\)",
+        r"let a relay such as MediaMTX ingest it and read its RTSP output",
     ):
         load_config(_write(tmp_path, "source:\n  type: stream\n  url: srt://10.0.0.5:9000\n"))
 
