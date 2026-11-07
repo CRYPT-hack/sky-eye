@@ -148,3 +148,34 @@ def test_missing_file_is_stale(tmp_path, caplog):
     assert t.latest() is None
     assert t.track(5.0) == []
     assert any("nope.SRT" in r.getMessage() for r in caplog.records)
+
+
+def test_load_is_synchronous_and_idempotent(tmp_path):
+    t = DjiSrtTelemetry(_write(tmp_path, NEW), max_age_s=0.5)
+    assert t.state == "waiting"
+    t.load()
+    assert t.state == "ok"
+    assert t.pose_for(_frame(0.2)).lat == 22.5
+    t.load()  # second call: no re-parse, same result
+    assert t.state == "ok" and t.pose_for(_frame(0.9)).lat == -22.6
+    t.start()  # already loaded: no helper thread
+    assert t._loader is None
+    assert t.state == "ok"
+
+
+TEL_SRT = "telemetry:" + chr(10) + "  type: dji_srt" + chr(10)
+
+
+def test_build_telemetry_loads_srt_before_start(tmp_path):
+    from engine.config import load_config
+    from engine.telemetry import build_telemetry
+    from tests.conftest import make_video
+    from tests.test_cli import write_config
+
+    video = make_video(tmp_path / "v.mp4", 5)
+    (tmp_path / "v.srt").write_text(NEW, encoding="utf-8")
+    cfg = load_config(write_config(
+        tmp_path, source=f"  path: {video.as_posix()}", extra=TEL_SRT))
+    t = build_telemetry(cfg)
+    assert t.state == "ok"  # poses are there before start() and before the first frame
+    assert t.pose_for(_frame(0.2)).lat == 22.5

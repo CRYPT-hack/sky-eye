@@ -856,6 +856,9 @@ def test_build_telemetry_selects_source(tmp_path, monkeypatch):
             super().__init__()
             calls["srt"] = (path, max_age_s, loop)
 
+        def load(self):
+            calls["srt_loaded"] = True
+
     class FakeMav(FakeTelemetry):
         def __init__(self, connection, max_age_s, stale_after_s, **kw):
             super().__init__()
@@ -873,6 +876,7 @@ def test_build_telemetry_selects_source(tmp_path, monkeypatch):
     assert isinstance(build_telemetry(cfg_for("")), NoTelemetry)
     build_telemetry(cfg_for("telemetry:\n  type: dji_srt\n  max_age_s: 0.7\n"))
     assert calls["srt"] == (srt, 0.7, True)
+    assert calls["srt_loaded"]
     build_telemetry(cfg_for(
         "telemetry:\n  type: mavlink\n  connection: udpin:0.0.0.0:14551\n  stale_after_s: 3\n"))
     assert calls["mav"] == ("udpin:0.0.0.0:14551", 0.5, 3.0)

@@ -91,17 +91,25 @@ class DjiSrtTelemetry:
         self._last_t: float | None = None
         self._lock = threading.Lock()
 
-    def start(self) -> None:
-        """Parse the file on a helper thread; state stays "waiting" until it is done."""
+    def load(self) -> None:
+        """Parse the file now, on the calling thread. Idempotent."""
         with self._lock:
-            if self._loader is not None:
+            if self._started:
+                return
+        self._parse_file()
+
+    def start(self) -> None:
+        """Already loaded: nothing to do. Otherwise parse on a helper thread, and the
+        state stays "waiting" until it is done."""
+        with self._lock:
+            if self._started or self._loader is not None:
                 return
             self._loader = threading.Thread(
-                target=self._load, name="sky-eye-srt-load", daemon=True
+                target=self._parse_file, name="sky-eye-srt-load", daemon=True
             )
         self._loader.start()
 
-    def _load(self) -> None:
+    def _parse_file(self) -> None:
         poses: list[DronePose] = []
         period = 0.0
         try:
