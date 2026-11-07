@@ -1,7 +1,12 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
+
+// Leaflet needs a real browser; the map page is only checked for loading here.
+vi.mock("./map/leafletView", () => ({
+  createMapView: () => ({ setTrucks() {}, setDrone() {}, fitToData() {}, destroy() {} }),
+}));
 
 beforeEach(() => {
   window.location.hash = "";
@@ -32,7 +37,7 @@ test("nav marks the active page", () => {
   expect(navLink("Status")).not.toHaveAttribute("aria-current");
 });
 
-test("header shows the product name and the three nav links", () => {
+test("header shows the product name and the four nav links", () => {
   render(<App />);
 
   expect(screen.getByRole("banner")).toHaveTextContent("sky-eye");
@@ -40,6 +45,7 @@ test("header shows the product name and the three nav links", () => {
   expect(nav).toContainElement(navLink("Live"));
   expect(navLink("Live")).toHaveAttribute("href", "#/live");
   expect(navLink("Trucks")).toHaveAttribute("href", "#/trucks");
+  expect(navLink("Map")).toHaveAttribute("href", "#/map");
   expect(navLink("Status")).toHaveAttribute("href", "#/status");
 });
 
@@ -80,4 +86,21 @@ test("clicking a nav link switches the page", async () => {
 
   await waitFor(() => expect(navLink("Trucks")).toHaveAttribute("aria-current", "page"));
   expect(screen.getByRole("heading", { level: 1, name: "Trucks" })).toBeInTheDocument();
+});
+
+test("nav includes Map between Trucks and Status", () => {
+  render(<App />);
+
+  const labels = within(screen.getByRole("navigation")).getAllByRole("link").map((a) => a.textContent);
+  expect(labels).toEqual(["Live", "Trucks", "Map", "Status"]);
+});
+
+test("the map route loads the map page and marks Map current", async () => {
+  window.location.hash = "#/map";
+  render(<App />);
+
+  expect(screen.getByRole("heading", { level: 1, name: "Map" })).toBeInTheDocument();
+  expect(navLink("Map")).toHaveAttribute("aria-current", "page");
+  expect(await screen.findByRole("region", { name: "Map" })).toBeInTheDocument();
+  expect(document.title).toBe("Map – sky-eye");
 });

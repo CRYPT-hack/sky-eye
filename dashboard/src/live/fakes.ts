@@ -29,7 +29,7 @@ export const STATUS: Status = {
   trucks_now: 0,
   trucks_total: 0,
   started_at: "2026-11-06T06:00:00Z",
-  telemetry_state: "off",
+  telemetry_state: "none",
 };
 
 export function makeClient(trucks: Truck[] = [], status: Status = STATUS): ApiClient {
@@ -39,6 +39,7 @@ export function makeClient(trucks: Truck[] = [], status: Status = STATUS): ApiCl
     listTrucks: vi.fn(async () => ({ trucks, limit: 20, offset: 0 })),
     getTruck: vi.fn(),
     getRuntime: vi.fn(),
+    getTelemetry: vi.fn(async () => ({ state: "none", latest: null, track: [] })),
     putRuntime: vi.fn(),
     sendTestAlert: vi.fn(),
     mediaUrl: (p: string) => `${p}?token=t`,

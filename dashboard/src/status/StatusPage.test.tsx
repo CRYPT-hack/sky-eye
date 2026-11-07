@@ -411,3 +411,18 @@ test("send test alert with nothing switched on, and with an error", async () => 
   expect(screen.queryByText("No channel is switched on")).not.toBeInTheDocument();
   expect(screen.getByRole("alert")).toHaveTextContent("no alert channels configured");
 });
+
+test("drone position fact follows the telemetry state", async () => {
+  const { c } = setup();
+  await flush();
+  expect(fact("Drone position")).toHaveTextContent(/^Off$/);
+  for (const [state, text] of [
+    ["waiting", "Waiting"],
+    ["ok", "OK"],
+    ["stale", "Stale"],
+  ] as const) {
+    c.getStatus.mockResolvedValue({ ...STATUS, telemetry_state: state });
+    await flush(2000);
+    expect(fact("Drone position")).toHaveTextContent(new RegExp(`^${text}$`));
+  }
+});

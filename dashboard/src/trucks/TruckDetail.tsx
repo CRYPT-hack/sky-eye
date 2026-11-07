@@ -76,6 +76,34 @@ function playableClip(t: Truck): string | null {
   return t.clip_url;
 }
 
+/** The Location row: coordinates with their error, a map link when the fix is reliable. */
+function LocationValue({ truck: t }: { truck: Truck }) {
+  const { lat: latitude, lon: longitude } = t;
+  const error = t.geo_error_m === null ? "" : ` (±${Math.round(t.geo_error_m)} m)`;
+  if (t.geo_status === "ok" && latitude !== null && longitude !== null) {
+    const lat = latitude.toFixed(5);
+    const lon = longitude.toFixed(5);
+    return (
+      <>
+        {`${lat}, ${lon}${error}`}{" "}
+        <a
+          href={`https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=17/${lat}/${lon}`}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Open in OpenStreetMap
+        </a>
+      </>
+    );
+  }
+  if (t.geo_status === "unreliable") {
+    return latitude !== null && longitude !== null
+      ? `Approximate: ${latitude.toFixed(5)}, ${longitude.toFixed(5)}${error}`
+      : "Not reliable (camera too close to the horizon)";
+  }
+  return "Unknown";
+}
+
 export default function TruckDetail({ id }: { id: number }) {
   const { client, authEpoch, reportUnauthorized } = useApi();
   const [state, setState] = useState<State>({ kind: "loading" });
@@ -212,9 +240,7 @@ export default function TruckDetail({ id }: { id: number }) {
         <dd>{t.track_id}</dd>
         <dt>Location</dt>
         <dd>
-          {t.geo_status === "unknown" || t.lat === null || t.lon === null
-            ? "Unknown"
-            : `${t.lat.toFixed(5)}, ${t.lon.toFixed(5)}`}
+          <LocationValue truck={t} />
         </dd>
       </dl>
     </div>

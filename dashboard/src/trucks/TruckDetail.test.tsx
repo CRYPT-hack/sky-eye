@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { ApiProvider, useApi } from "../apiContext";
@@ -311,4 +311,47 @@ describe("clip_status from the engine", () => {
     await flush(30_000);
     expect(mock).toHaveBeenCalledTimes(calls);
   });
+});
+
+const row = () => screen.getByText("Location", { selector: "dt" }).nextElementSibling!;
+
+test("location of an ok truck has coordinates, error and an OpenStreetMap link", async () => {
+  setup(
+    makeTruck(5, { geo_status: "ok", lat: 12.345678, lon: 77.1, geo_error_m: 6.6, ...OLD }),
+  );
+  await screen.findByAltText("Truck #5 full frame");
+  expect(row()).toHaveTextContent("12.34568, 77.10000 (±7 m)");
+  const link = within(row() as HTMLElement).getByRole("link", { name: "Open in OpenStreetMap" });
+  expect(link).toHaveAttribute(
+    "href",
+    "https://www.openstreetmap.org/?mlat=12.34568&mlon=77.10000#map=17/12.34568/77.10000",
+  );
+  expect(link).toHaveAttribute("target", "_blank");
+  expect(link).toHaveAttribute("rel", "noopener noreferrer");
+});
+
+test("location of an unreliable truck with a position is approximate, without a link", async () => {
+  setup(
+    makeTruck(5, { geo_status: "unreliable", lat: 12.5, lon: 77.5, geo_error_m: 180.4, ...OLD }),
+  );
+  await screen.findByAltText("Truck #5 full frame");
+  expect(row()).toHaveTextContent("Approximate: 12.50000, 77.50000 (±180 m)");
+  expect(within(row() as HTMLElement).queryByRole("link")).not.toBeInTheDocument();
+});
+
+test("location of an unreliable truck without a position explains why", async () => {
+  setup(makeTruck(5, { geo_status: "unreliable", lat: null, lon: null, ...OLD }));
+  await screen.findByAltText("Truck #5 full frame");
+  expect(row()).toHaveTextContent("Not reliable (camera too close to the horizon)");
+});
+
+test("location is Unknown for unknown or missing geo status", async () => {
+  const first = setup(makeTruck(5, { geo_status: "unknown", ...OLD }));
+  await screen.findByAltText("Truck #5 full frame");
+  expect(row()).toHaveTextContent(/^Unknown$/);
+  first.view.unmount();
+
+  setup(makeTruck(5, { geo_status: undefined as unknown as string, ...OLD }));
+  await screen.findByAltText("Truck #5 full frame");
+  expect(row()).toHaveTextContent(/^Unknown$/);
 });

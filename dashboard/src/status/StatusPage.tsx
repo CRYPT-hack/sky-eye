@@ -3,7 +3,14 @@ import { ApiError } from "../api/client";
 import type { Info, Status } from "../api/types";
 import { useApi } from "../apiContext";
 import Banner from "../components/Banner";
-import { formatAlertChannel, formatDuration, formatFps, formatScore, formatSourceState } from "../format";
+import {
+  formatAlertChannel,
+  formatDuration,
+  formatFps,
+  formatScore,
+  formatSourceState,
+  formatTelemetryState,
+} from "../format";
 
 const POLL_MS = 2000;
 const SAVE_DEBOUNCE_MS = 400;
@@ -251,6 +258,10 @@ export default function StatusPage() {
           />
           <Fact label="Frames processed" value={status ? status.frames_processed : "–"} />
           <Fact label="FPS" value={status ? formatFps(status.fps) : "–"} />
+          <Fact
+            label="Drone position"
+            value={status ? formatTelemetryState(status.telemetry_state) : "–"}
+          />
         </dl>
       </section>
 

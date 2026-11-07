@@ -50,6 +50,18 @@ export function formatScore(score: number): string {
   return `${Math.round(score * 100)}%`;
 }
 
+const TELEMETRY_LABEL: Readonly<Record<string, string>> = {
+  none: "Off",
+  waiting: "Waiting",
+  ok: "OK",
+  stale: "Stale",
+};
+
+/** Drone position state as shown on the status page; a state this site does not know is shown as sent. */
+export function formatTelemetryState(state: string): string {
+  return Object.hasOwn(TELEMETRY_LABEL, state) ? TELEMETRY_LABEL[state] : state;
+}
+
 const ALERT_LABEL: Readonly<Record<string, string>> = {
   desktop: "Laptop",
   telegram: "Telegram",

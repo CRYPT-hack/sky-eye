@@ -1,4 +1,4 @@
-import type { Info, Runtime, Status, Truck } from "./types";
+import type { Info, Runtime, Status, Telemetry, Truck } from "./types";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -21,6 +21,8 @@ export interface ApiClient {
   getStatus(): Promise<Status>;
   listTrucks(q?: TruckQuery): Promise<{ trucks: Truck[]; limit: number; offset: number }>;
   getTruck(id: number): Promise<Truck>;
+  /** The drone's latest position and its track over the last `seconds` (1-3600). */
+  getTelemetry(seconds?: number): Promise<Telemetry>;
   getRuntime(): Promise<Runtime>;
   putRuntime(patch: Partial<Runtime>): Promise<Runtime>;
   /** Sends a test alert; resolves with the channels it reached (may be empty). */
@@ -87,6 +89,10 @@ export function createClient(opts: ClientOptions): ApiClient {
     },
     async getTruck(id) {
       return (await request<{ truck: Truck }>(`/api/trucks/${id}`)).truck;
+    },
+    async getTelemetry(seconds = 300) {
+      const r = await request<Telemetry>(`/api/telemetry?seconds=${seconds}`);
+      return { state: r.state, latest: r.latest, track: r.track };
     },
     async getRuntime() {
       return (await request<{ runtime: Runtime }>("/api/config/runtime")).runtime;

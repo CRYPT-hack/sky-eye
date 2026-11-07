@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, type ReactNode } from "react";
 import { ApiProvider, useApi } from "./apiContext";
 import TokenPrompt from "./components/TokenPrompt";
 import LivePage from "./live/LivePage";
@@ -7,7 +7,10 @@ import TruckDetail from "./trucks/TruckDetail";
 import TrucksPage from "./trucks/TrucksPage";
 import { href, useRoute, type Route } from "./router";
 
-type Section = "live" | "trucks" | "status";
+// Leaflet is big and only the map page needs it: load it when the page is first opened.
+const MapPage = lazy(() => import("./map/MapPage"));
+
+type Section = "live" | "trucks" | "map" | "status";
 
 function NavIcon({ children }: { children: ReactNode }) {
   return (
@@ -51,6 +54,16 @@ const SECTIONS: { section: Section; label: string; icon: ReactNode }[] = [
     ),
   },
   {
+    section: "map",
+    label: "Map",
+    icon: (
+      <NavIcon>
+        <path d="M9 4.5 3.5 6.5v13L9 17.5l6 2 5.5-2v-13L15 6.5z" />
+        <path d="M9 4.5v13M15 6.5v13" />
+      </NavIcon>
+    ),
+  },
+  {
     section: "status",
     label: "Status",
     icon: (
@@ -76,6 +89,8 @@ function pageTitle(route: Route): string {
       return "Trucks";
     case "truck":
       return `Truck #${route.id}`;
+    case "map":
+      return "Map";
     case "status":
       return "Status";
   }
@@ -142,6 +157,10 @@ function Shell() {
             <TrucksPage />
           ) : route.page === "truck" ? (
             <TruckDetail id={route.id} />
+          ) : route.page === "map" ? (
+            <Suspense fallback={<p className="muted">Loading map…</p>}>
+              <MapPage />
+            </Suspense>
           ) : (
             <StatusPage />
           )}
