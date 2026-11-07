@@ -39,6 +39,10 @@ test("formatScore", () => {
   expect(formatScore(0.87)).toBe("87%");
 });
 
+test("connecting source state has a label", () => {
+  expect(formatSourceState("connecting")).toBe("Connecting");
+});
+
 test("reconnecting source state has a label", async () => {
   const { formatSourceState } = await import("./format");
   expect(formatSourceState("reconnecting")).toBe("Reconnecting");

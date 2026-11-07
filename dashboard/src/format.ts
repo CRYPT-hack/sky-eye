@@ -28,6 +28,7 @@ export function formatDuration(fromIso: string, toIso: string): string {
 /** Labels for the engine's source states, shared by the live and status pages. */
 export const SOURCE_LABEL: Readonly<Record<SourceState, string>> = {
   starting: "Starting",
+  connecting: "Connecting",
   running: "Running",
   reconnecting: "Reconnecting",
   ended: "Ended",

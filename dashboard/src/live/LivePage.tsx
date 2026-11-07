@@ -53,6 +53,9 @@ export default function LivePage({ connect }: { connect?: typeof connectLive }) 
       <StreamView src={client.streamUrl()} liveState={state} />
 
       {state === "reconnecting" && <Banner tone="warn">Reconnecting to the engine…</Banner>}
+      {status?.source_state === "connecting" && (
+        <Banner tone="warn">Waiting for drone video…</Banner>
+      )}
       {status?.source_state === "reconnecting" && (
         <Banner tone="warn">Drone video lost — reconnecting…</Banner>
       )}

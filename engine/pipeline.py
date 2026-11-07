@@ -29,7 +29,8 @@ _FAIL_SUMMARY_S = 10.0  # repeated frame failures: at most one log line per this
 
 @dataclass
 class PipelineStatus:
-    source_state: str  # "starting" | "running" | "reconnecting" | "ended" | "error"
+    # "starting" | "connecting" | "running" | "reconnecting" | "ended" | "error"
+    source_state: str
     fps: float  # processed frames/s over the last 2 s
     frames_processed: int
     trucks_now: int
@@ -257,12 +258,20 @@ class Pipeline:
 
     def _mirror_source_state(self) -> None:
         """Capture thread: after the first frame, report the source's own health
-        ("running" / "reconnecting"); "ended" and "error" are never overwritten."""
-        if not self._got_frame:
-            return
+        ("running" / "reconnecting"). Before it, "starting" (a stream reports
+        "reconnecting" until its first frame, which is not a lost link), or
+        "connecting" once an attempt failed (e.g. a stream unreachable at startup).
+        "ended" and "error" are never overwritten."""
         source_state = getattr(self._source, "state", "running")
+        if not self._got_frame:
+            failed = getattr(self._source, "failed_attempts", 0)
+            if source_state == "reconnecting" and isinstance(failed, int) and failed > 0:
+                with self._lock:
+                    if self._state == "starting":
+                        self._state = "connecting"
+            return
         with self._lock:
-            if self._state in ("starting", "running", "reconnecting"):
+            if self._state in ("starting", "connecting", "running", "reconnecting"):
                 self._state = source_state
 
     def _close_source(self) -> None:

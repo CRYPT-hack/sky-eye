@@ -526,6 +526,61 @@ class LiveFakeSource:
         return self._ended
 
 
+def test_pipeline_reports_connecting_while_the_first_frame_is_overdue(tmp_path):
+    source = LiveFakeSource()  # "reconnecting" from the start, like StreamSource
+    rig = Rig(tmp_path, source, FakeDetector(nothing), realtime=True)
+    try:
+        rig.pipeline.start()
+        time.sleep(0.1)
+        # normal startup: no attempt has failed yet
+        assert rig.pipeline.status().source_state == "starting"
+        source.failed_attempts = 1  # the first connection attempt failed
+        assert wait_until(lambda: rig.pipeline.status().source_state == "connecting", 5.0)
+        source.state = "running"
+        source.failed_attempts = 0
+        source.push(fake_frame(0, 0.0))
+        assert wait_until(lambda: rig.pipeline.status().source_state == "running", 5.0)
+        source.state = "reconnecting"  # after the first frame: lost, not connecting
+        source.failed_attempts = 1
+        assert wait_until(lambda: rig.pipeline.status().source_state == "reconnecting", 5.0)
+        time.sleep(0.05)
+        assert rig.pipeline.status().source_state == "reconnecting"
+        source.finish()
+        assert wait_until(lambda: rig.pipeline.status().source_state == "ended", 5.0)
+    finally:
+        rig.close()
+
+
+def test_unreachable_stream_at_startup_shows_connecting(tmp_path):
+    from engine.sources.stream import StreamSource
+
+    def refuse(url, options):
+        raise OSError("connection refused")
+
+    source = StreamSource("rtsp://127.0.0.1:9/live", opener=refuse)
+    rig = Rig(tmp_path, source, FakeDetector(nothing), realtime=True)  # opens: no raise
+    try:
+        rig.pipeline.start()
+        assert wait_until(lambda: rig.pipeline.status().source_state == "connecting", 5.0)
+    finally:
+        rig.close()
+
+
+def test_pipeline_connecting_never_overrides_ended(tmp_path):
+    source = LiveFakeSource()
+    source.failed_attempts = 3
+    rig = Rig(tmp_path, source, FakeDetector(nothing), realtime=True)
+    try:
+        rig.pipeline.start()
+        assert wait_until(lambda: rig.pipeline.status().source_state == "connecting", 5.0)
+        source.finish()  # ends without ever delivering a frame
+        assert wait_until(lambda: rig.pipeline.status().source_state == "ended", 5.0)
+        time.sleep(0.05)
+        assert rig.pipeline.status().source_state == "ended"
+    finally:
+        rig.close()
+
+
 def test_pipeline_reports_reconnecting(tmp_path):
     source = LiveFakeSource()
     rig = Rig(tmp_path, source, FakeDetector(nothing), realtime=True)

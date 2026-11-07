@@ -1,6 +1,13 @@
 // Shapes of the engine's JSON API (api version 1). Times are ISO-8601 UTC strings.
 
-export type SourceState = "starting" | "running" | "reconnecting" | "ended" | "error";
+/** "connecting": no frame yet and the first attempt failed (e.g. stream unreachable). */
+export type SourceState =
+  | "starting"
+  | "connecting"
+  | "running"
+  | "reconnecting"
+  | "ended"
+  | "error";
 
 export interface Status {
   source_state: SourceState;
