@@ -68,10 +68,10 @@ def wait_for(pred, timeout=DEADLINE_S):
 def tel_factory():
     made = []
 
-    def make(conn, clock=time.time, stale_after_s=2.0, max_age_s=0.5, monotonic=None):
+    def make(conn, clock=time.time, stale_after_s=2.0, max_age_s=0.5, monotonic=None, **kw):
         t = MavlinkTelemetry("udpin:127.0.0.1:1", max_age_s, stale_after_s,
                              conn_factory=lambda c: conn, clock=clock,
-                             monotonic=monotonic or clock)
+                             monotonic=monotonic or clock, **kw)
         made.append(t)
         t.start()
         return t
@@ -107,6 +107,26 @@ def test_defaults_without_attitude_or_gimbal(tel_factory):
     assert p.yaw_deg == pytest.approx(180.0)  # hdg fallback
     assert p.cam_pitch_deg == -90.0
     assert p.cam_roll_deg == 0.0
+    assert p.pitch_assumed and not p.yaw_assumed and not p.alt_assumed
+
+
+def test_measured_attitude_and_gimbal_are_not_assumed(tel_factory):
+    conn = FakeConn([att(0.5), Msg("MOUNT_STATUS", pointing_a=-4500, pointing_b=0), gpi()])
+    t = tel_factory(conn)
+    assert wait_for(lambda: t.latest() is not None)
+    p = t.latest()
+    assert (p.pitch_assumed, p.yaw_assumed, p.alt_assumed) == (False, False, False)
+
+
+def test_configured_pitch_used_until_a_gimbal_message(tel_factory):
+    conn = FakeConn([gpi(lat=1.0)])
+    t = tel_factory(conn, pitch_deg=-60.0)
+    assert wait_for(lambda: t.latest() is not None)
+    p = t.latest()
+    assert (p.cam_pitch_deg, p.cam_roll_deg, p.pitch_assumed) == (-60.0, 0.0, False)
+    conn.push(Msg("MOUNT_STATUS", pointing_a=-3000, pointing_b=0), gpi(lat=2.0))
+    assert wait_for(lambda: t.latest().lat == pytest.approx(2.0))
+    assert t.latest().cam_pitch_deg == pytest.approx(-30.0)  # measured wins
 
 
 def test_negative_yaw_normalised(tel_factory):
@@ -261,6 +281,7 @@ def test_hdg_unknown_gives_zero_yaw(tel_factory):
     t = tel_factory(FakeConn([gpi(hdg=65535)]))
     assert wait_for(lambda: t.latest() is not None)
     assert t.latest().yaw_deg == 0.0
+    assert t.latest().yaw_assumed
 
 
 def test_yaw_never_reaches_360(tel_factory):

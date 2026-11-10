@@ -71,7 +71,30 @@ def test_gimbal_missing_defaults_nadir(caplog):
     with caplog.at_level(logging.INFO):
         poses = parse_srt(text)
     assert [p.cam_pitch_deg for p in poses] == [-90.0, -90.0]
+    assert [p.pitch_assumed for p in poses] == [True, True]
     assert sum("pitch" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_measured_angles_are_not_assumed():
+    poses = parse_srt(NEW)
+    assert [(p.pitch_assumed, p.yaw_assumed, p.alt_assumed) for p in poses] == [
+        (False, False, False), (False, False, False)]
+
+
+def test_configured_pitch_replaces_a_missing_gimbal_pitch(caplog):
+    text = NEW.replace("gb_pitch: -45.0", "").replace("gb_pitch: -50.0", "")
+    with caplog.at_level(logging.INFO):
+        poses = parse_srt(text, pitch_deg=-60.0)
+    assert [(p.cam_pitch_deg, p.pitch_assumed) for p in poses] == [(-60.0, False)] * 2
+    assert "camera.pitch_deg" in caplog.text
+    # a measured pitch still wins
+    assert parse_srt(NEW, pitch_deg=-60.0)[0].cam_pitch_deg == -45.0
+
+
+def test_missing_yaw_is_assumed_north():
+    text = NEW.replace("[yaw: 30.0] ", "").replace("gb_yaw: 10.0 ", "").replace("gb_yaw: 15.0 ", "")
+    poses = parse_srt(text)
+    assert [(p.yaw_deg, p.yaw_assumed) for p in poses] == [(0.0, True), (0.0, True)]
 
 
 def test_garbage_lines_skipped():
@@ -93,9 +116,9 @@ def test_start_returns_before_parsing_finishes(tmp_path, monkeypatch):
     release = threading.Event()
     real = mod._parse
 
-    def slow(text):
+    def slow(text, *args):
         release.wait(5)
-        return real(text)
+        return real(text, *args)
 
     monkeypatch.setattr(mod, "_parse", slow)
     t = DjiSrtTelemetry(_write(tmp_path, NEW), max_age_s=0.5)
@@ -179,3 +202,18 @@ def test_build_telemetry_loads_srt_before_start(tmp_path):
     t = build_telemetry(cfg)
     assert t.state == "ok"  # poses are there before start() and before the first frame
     assert t.pose_for(_frame(0.2)).lat == 22.5
+
+
+def test_build_telemetry_passes_camera_pitch(tmp_path):
+    from engine.config import load_config
+    from engine.telemetry import build_telemetry
+    from tests.conftest import make_video
+    from tests.test_cli import write_config
+
+    video = make_video(tmp_path / "v.mp4", 5)
+    (tmp_path / "v.srt").write_text(NEW.replace("gb_pitch: -45.0", ""), encoding="utf-8")
+    cfg = load_config(write_config(
+        tmp_path, source=f"  path: {video.as_posix()}",
+        extra=TEL_SRT + "camera:" + chr(10) + "  pitch_deg: -70" + chr(10)))
+    p = build_telemetry(cfg).pose_for(_frame(0.2))
+    assert (p.cam_pitch_deg, p.pitch_assumed) == (-70.0, False)

@@ -47,6 +47,7 @@ class MavlinkTelemetry:
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         backoff_initial: float = 1.0,
+        pitch_deg: float | None = None,
     ) -> None:
         validate_connection(connection)  # UDP or serial only (a dead TCP link spins pymavlink)
         self._connection = connection
@@ -63,6 +64,7 @@ class MavlinkTelemetry:
         self._gimbal: tuple[float, float] | None = None
         self._noted_gimbal = False
         self._has_quaternion = False  # quaternion gimbal data wins over MOUNT_STATUS
+        self._pitch_deg = pitch_deg  # camera.pitch_deg: used until a gimbal message arrives
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -152,17 +154,28 @@ class MavlinkTelemetry:
             return
         now = self._clock()
         yaw = self._yaw_deg
+        yaw_assumed = False
         if yaw is None:
-            yaw = _norm_yaw(msg.hdg / 100.0) if msg.hdg != _HDG_UNKNOWN else 0.0
+            if msg.hdg != _HDG_UNKNOWN:
+                yaw = _norm_yaw(msg.hdg / 100.0)
+            else:
+                yaw, yaw_assumed = 0.0, True  # no ATTITUDE and no heading
         gimbal = self._gimbal
+        pitch_assumed = False
         if gimbal is None:
+            if self._pitch_deg is not None:
+                gimbal = (self._pitch_deg, 0.0)
+            else:
+                gimbal, pitch_assumed = (-90.0, 0.0), True
             if not self._noted_gimbal:
                 self._noted_gimbal = True
-                log.info("no MAVLink gimbal message yet; assuming camera straight down (-90)")
-            gimbal = (-90.0, 0.0)
+                log.info("no MAVLink gimbal message yet; %s",
+                         "using camera.pitch_deg" if self._pitch_deg is not None else
+                         "assuming camera straight down (-90), locations are unreliable")
         pose = DronePose(
             ts=now, lat=lat, lon=lon, alt_agl_m=alt, yaw_deg=yaw,
             cam_pitch_deg=gimbal[0], cam_roll_deg=gimbal[1],
+            pitch_assumed=pitch_assumed, yaw_assumed=yaw_assumed,
         )
         with self._lock:
             self._last_pos_mono = self._monotonic()  # before the pose becomes visible

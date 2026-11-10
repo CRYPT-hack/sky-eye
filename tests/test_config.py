@@ -268,6 +268,7 @@ def test_telemetry_defaults(tmp_path):
     assert cfg.telemetry.srt_path is None
     assert cfg.telemetry.max_age_s == 0.5 and cfg.telemetry.stale_after_s == 2.0
     assert cfg.camera.hfov_deg == 82.0
+    assert cfg.camera.pitch_deg is None
     assert cfg.api.map_tile_url == "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
 
@@ -279,6 +280,8 @@ def test_telemetry_defaults(tmp_path):
         ("camera:\n  hfov_deg: 5\n", r"camera\.hfov_deg"),
         ("camera:\n  hfov_deg: 171\n", r"camera\.hfov_deg"),
         ("telemetry:\n  type: gps\n", r"telemetry\.type"),
+        ("camera:\n  pitch_deg: -91\n", r"camera\.pitch_deg"),
+        ("camera:\n  pitch_deg: 1\n", r"camera\.pitch_deg"),
     ],
 )
 def test_telemetry_camera_bounds(tmp_path, body, field):
@@ -298,6 +301,12 @@ def test_telemetry_camera_bounds(tmp_path, body, field):
 def test_map_tile_url_rejected(tmp_path, url):
     with pytest.raises(ConfigError, match=r"api\.map_tile_url"):
         load_config(_write(tmp_path, f'api:\n  map_tile_url: "{url}"\n'))
+
+
+@pytest.mark.parametrize("value", [-90, -45.5, 0])
+def test_camera_pitch_accepted(tmp_path, value):
+    cfg = load_config(_write(tmp_path, f"camera:\n  pitch_deg: {value}\n"))
+    assert cfg.camera.pitch_deg == value
 
 
 def test_map_tile_url_accepts_http(tmp_path):

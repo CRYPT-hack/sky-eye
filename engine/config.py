@@ -235,6 +235,9 @@ class TelemetryConfig(_Model):
 
 class CameraConfig(_Model):
     hfov_deg: float = Field(default=82.0, ge=10, le=170)
+    # A fixed camera angle (-90 = straight down), used when the telemetry has no gimbal
+    # pitch; None = such locations are "unreliable"
+    pitch_deg: float | None = Field(default=None, ge=-90, le=0)
 
 
 def _sibling_srt(video: Path) -> Path | None:

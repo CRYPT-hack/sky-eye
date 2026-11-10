@@ -31,7 +31,12 @@ def geolocate(
     pose: DronePose | None,
     hfov_deg: float,
 ) -> GeoFix:
-    """Where the ray through the box's bottom-centre pixel meets flat ground."""
+    """Where the ray through the box's bottom-centre pixel meets flat ground.
+
+    A pose whose camera pitch or height was assumed (not measured) gives "unreliable"
+    with an error of at least 200 m; an assumed heading (with a known pitch) widens the
+    error by the distance the point could swing round the drone.
+    """
     if pose is None:
         return GeoFix(None, None, None, "unknown")
     east, north, up = _ray_enu(box, frame_size, pose, hfov_deg)
@@ -44,7 +49,14 @@ def geolocate(
     t = pose.alt_agl_m / -up
     slant_range = t * norm
     error_m = 3.0 + slant_range * math.tan(math.radians(2.0)) / max(math.sin(depression), 0.05)
-    lat, lon = _offset_latlon(pose.lat, pose.lon, t * east, t * north)
+    east_m, north_m = t * east, t * north
+    if pose.yaw_assumed and not pose.pitch_assumed:
+        # unknown heading: the point may be anywhere on the circle through it around the
+        # drone's ground point, at most twice its distance from where it is drawn
+        error_m += 2.0 * math.hypot(east_m, north_m)
+    lat, lon = _offset_latlon(pose.lat, pose.lon, east_m, north_m)
+    if pose.pitch_assumed or pose.alt_assumed:
+        return GeoFix(lat, lon, max(error_m, _MAX_ERROR_M), "unreliable")
     return GeoFix(lat, lon, error_m, "unreliable" if error_m > _MAX_ERROR_M else "ok")
 
 
