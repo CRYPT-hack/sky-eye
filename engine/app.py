@@ -156,6 +156,7 @@ def _engine_info(cfg: AppConfig, source_fps: float) -> dict[str, Any]:
         "alerts": cfg.alerts.channels(),
         "telemetry": cfg.telemetry.type,
         "map_tile_url": cfg.api.map_tile_url,
+        "map_tile_attribution": cfg.api.map_tile_attribution,
     }
 
 

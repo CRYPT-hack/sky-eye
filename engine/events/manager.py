@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 
 _TELEMETRY_LOG_S = 10.0  # repeated telemetry failures: one summary per this period
 _HEARTBEAT_S = 5.0  # an active truck's last_seen is refreshed at most this often (frame time)
+_GEO_RANK = {"unknown": 0, "unreliable": 1, "ok": 2}  # a location is only replaced by one as good
 
 
 def _iso(value: datetime) -> str:
@@ -191,8 +192,8 @@ class EventManager:
                         state.best_score = score
                         fields: dict[str, object] = {"best_score": score}
                         fix = self._geo(frame, track.detection.box, pose)
-                        # never replace a good location by a worse one
-                        if fix.status == "ok" or state.geo_status != "ok":
+                        # never replace a location by a worse one: ok > unreliable > unknown
+                        if _GEO_RANK.get(fix.status, 0) >= _GEO_RANK.get(state.geo_status, 0):
                             state.geo_status = fix.status
                             fields.update(
                                 lat=fix.lat,

@@ -166,6 +166,8 @@ class ApiConfig(_Model):
     stream_max_width: int = Field(default=1280, ge=16)
     dashboard_dir: Path | None = None  # None = <repo>/dashboard/dist
     map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    # plain text (the website escapes it); credit the tile provider of map_tile_url
+    map_tile_attribution: str = "© OpenStreetMap contributors"
 
     @field_validator("map_tile_url")
     @classmethod

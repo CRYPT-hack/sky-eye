@@ -270,6 +270,7 @@ def test_telemetry_defaults(tmp_path):
     assert cfg.camera.hfov_deg == 82.0
     assert cfg.camera.pitch_deg is None
     assert cfg.api.map_tile_url == "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    assert cfg.api.map_tile_attribution == "© OpenStreetMap contributors"
 
 
 @pytest.mark.parametrize(
@@ -307,6 +308,11 @@ def test_map_tile_url_rejected(tmp_path, url):
 def test_camera_pitch_accepted(tmp_path, value):
     cfg = load_config(_write(tmp_path, f"camera:\n  pitch_deg: {value}\n"))
     assert cfg.camera.pitch_deg == value
+
+
+def test_map_tile_attribution_is_plain_text(tmp_path):
+    cfg = load_config(_write(tmp_path, 'api:\n  map_tile_attribution: "Tiles <b>&</b> Esri"\n'))
+    assert cfg.api.map_tile_attribution == "Tiles <b>&</b> Esri"  # escaped where it is shown
 
 
 def test_map_tile_url_accepts_http(tmp_path):

@@ -834,6 +834,7 @@ def test_info_has_no_connection_string(tmp_path, monkeypatch):
     try:
         assert ctx.info["telemetry"] == "mavlink"
         assert ctx.info["map_tile_url"] == cfg.api.map_tile_url
+        assert ctx.info["map_tile_attribution"] == "© OpenStreetMap contributors"
         with TestClient(create_app(ctx)) as client:
             bodies = [client.get(p).text for p in (
                 "/api/info", "/api/status", "/api/telemetry", "/api/config/runtime")]

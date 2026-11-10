@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path, PureWindowsPath
 from urllib.parse import unquote, urlsplit
 
@@ -79,8 +80,12 @@ class TelegramNotifier:
         ]
         lat, lon = t.get("lat"), t.get("lon")
         if t.get("geo_status") == "ok" and lat is not None and lon is not None:
+            err = t.get("geo_error_m")
+            label = "Location"
+            if isinstance(err, (int, float)) and math.isfinite(err):
+                label += f" ±{math.floor(err + 0.5)} m"  # whole metres, half up like the website
             lines.append(
-                f"https://www.openstreetmap.org/?mlat={lat:.6f}&mlon={lon:.6f}"
+                f"{label}: https://www.openstreetmap.org/?mlat={lat:.6f}&mlon={lon:.6f}"
                 f"#map=17/{lat:.6f}/{lon:.6f}"
             )
         if self._dashboard:
