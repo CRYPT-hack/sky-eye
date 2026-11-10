@@ -227,10 +227,21 @@ class TelemetryConfig(_Model):
     max_age_s: float = Field(default=0.5, gt=0)
     stale_after_s: float = Field(default=2.0, gt=0)
 
-    @field_validator("connection")
-    @classmethod
-    def _udp_or_serial(cls, v: str) -> str:
-        return validate_connection(v)
+    @model_validator(mode="after")
+    def _udp_or_serial(self) -> TelemetryConfig:
+        # only checked when used: a leftover link under another type is harmless
+        if self.type != "mavlink":
+            return self
+        try:
+            validate_connection(self.connection)
+        except ValueError as e:
+            # keeps the field's loc, so the message names telemetry.connection
+            raise ValidationError.from_exception_data(
+                type(self).__name__,
+                [InitErrorDetails(type=PydanticCustomError("telemetry_connection", str(e)),
+                                  loc=("connection",), input=None)],
+            ) from None
+        return self
 
 
 class CameraConfig(_Model):

@@ -18,7 +18,7 @@ _TIME = re.compile(
 _TAG = re.compile(r"<[^>]*>")
 _BRACKET = re.compile(r"\[([^\]]*)\]")
 _PAIR = re.compile(r"(\w+)\s*:\s*" + _NUM)
-_GPS = re.compile(r"GPS\(\s*" + _NUM + r"\s*,\s*" + _NUM + r"\s*,\s*" + _NUM + r"\s*\)")
+_GPS = re.compile(r"GPS\s*\(\s*" + _NUM + r"\s*,\s*" + _NUM + r"\s*,\s*" + _NUM + r"\s*\)")
 _H = re.compile(r"(?<![A-Za-z])H\s*" + _NUM + r"\s*m\b")
 _BARO = re.compile(r"BAROMETER:\s*" + _NUM)
 
@@ -27,9 +27,12 @@ def _secs(h: str, m: str, s: str, frac: str) -> float:
     return int(h) * 3600 + int(m) * 60 + int(s) + int(frac) / 10 ** len(frac)
 
 
-def _parse(text: str, pitch_deg: float | None = None) -> tuple[list[DronePose], float]:
-    """Poses plus the end time of the last subtitle block. `pitch_deg` is the camera
-    pitch to use when a block has none (None: assume straight down, flagged)."""
+def _parse(
+    text: str, pitch_deg: float | None = None
+) -> tuple[list[DronePose], float, int]:
+    """Poses, the end time of the last subtitle block and the number of blocks.
+    `pitch_deg` is the camera pitch to use when a block has none (None: assume straight
+    down, flagged)."""
     matches = list(_TIME.finditer(text))
     poses: list[DronePose] = []
     noted: set[str] = set()
@@ -46,7 +49,8 @@ def _parse(text: str, pitch_deg: float | None = None) -> tuple[list[DronePose], 
         for br in _BRACKET.findall(body):
             for k, v in _PAIR.findall(br):
                 vals.setdefault(k.lower(), float(v))
-        lat, lon = vals.get("latitude"), vals.get("longitude")
+        # "longtitude" (sic) is written by some Mavic Air 2 / Mini 2 firmware
+        lat, lon = vals.get("latitude"), vals.get("longitude", vals.get("longtitude"))
         alt = vals.get("rel_alt")
         gps = _GPS.search(body)
         if (lat is None or lon is None) and gps:
@@ -54,9 +58,17 @@ def _parse(text: str, pitch_deg: float | None = None) -> tuple[list[DronePose], 
         if alt is None:
             h = _H.search(body) or _BARO.search(body)
             alt = float(h.group(1)) if h else None
+        alt_assumed = False
+        if alt is None and "altitude" in vals:
+            note_once("altitude", "SRT has no height above take-off; using its altitude, which "
+                      "may be absolute (above sea level), so locations are unreliable")
+            alt, alt_assumed = vals["altitude"], True
         if lat is None or lon is None or alt is None:
             continue
-        yaw = vals.get("yaw", vals.get("gb_yaw"))
+        if lat == 0 and lon == 0:
+            continue  # DJI writes 0, 0 before the GPS has a fix: no fix, no pose
+        # gb_yaw is the gimbal's (camera's) heading, which is what the ray needs
+        yaw = vals.get("gb_yaw", vals.get("yaw"))
         yaw_assumed = yaw is None
         if yaw is None:
             note_once("yaw", "SRT has no yaw; assuming 0 (north), locations get a wider error")
@@ -73,10 +85,10 @@ def _parse(text: str, pitch_deg: float | None = None) -> tuple[list[DronePose], 
         poses.append(DronePose(
             ts=_secs(*m.group(1, 2, 3, 4)), lat=lat, lon=lon, alt_agl_m=alt,
             yaw_deg=yaw, cam_pitch_deg=pitch, cam_roll_deg=vals.get("gb_roll", 0.0),
-            pitch_assumed=pitch_assumed, yaw_assumed=yaw_assumed,
+            pitch_assumed=pitch_assumed, yaw_assumed=yaw_assumed, alt_assumed=alt_assumed,
         ))
     period = _secs(*matches[-1].group(5, 6, 7, 8)) if matches else 0.0
-    return poses, period
+    return poses, period, len(matches)
 
 
 def parse_srt(text: str, pitch_deg: float | None = None) -> list[DronePose]:
@@ -100,6 +112,7 @@ class DjiSrtTelemetry:
         self._loader: threading.Thread | None = None
         self._count = 0
         self._last_t: float | None = None
+        self._last_hit: bool | None = None  # whether the last lookup after loading found a pose
         self._lock = threading.Lock()
 
     def load(self) -> None:
@@ -123,11 +136,18 @@ class DjiSrtTelemetry:
     def _parse_file(self) -> None:
         poses: list[DronePose] = []
         period = 0.0
+        name = self._path.name  # never the full path
         try:
             text = self._path.read_text(encoding="utf-8-sig", errors="replace")
-            poses, period = _parse(text, self._pitch_deg)
+            poses, period, blocks = _parse(text, self._pitch_deg)
         except Exception as e:  # telemetry problems must never stop detection
-            log.warning("cannot read SRT file %s: %s", self._path, e)
+            log.warning("cannot read SRT file %s: %s", name, type(e).__name__)
+        else:
+            if poses:
+                log.info("SRT %s: %d positions over %.1f s", name, len(poses), period)
+            else:
+                log.warning("SRT %s: none of the %d subtitle blocks had a position — "
+                            "format not recognised", name, blocks)
         buffer = PoseBuffer(self._max_age_s, capacity=max(len(poses), 1))
         for p in poses:
             buffer.add(p)
@@ -146,8 +166,12 @@ class DjiSrtTelemetry:
             t = t % self._period
         with self._lock:
             self._last_t = t
-            buffer = self._buffer
-        return buffer.nearest(t)
+            buffer, loaded = self._buffer, self._started
+        pose = buffer.nearest(t)
+        if loaded:
+            with self._lock:
+                self._last_hit = pose is not None
+        return pose
 
     def latest(self) -> DronePose | None:
         with self._lock:
@@ -166,4 +190,5 @@ class DjiSrtTelemetry:
         with self._lock:
             if not self._started:
                 return "waiting"
-            return "ok" if self._count else "stale"
+            # stale also when playback has run past the log (the last lookup missed)
+            return "ok" if self._count and self._last_hit is not False else "stale"

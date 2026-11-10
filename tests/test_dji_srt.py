@@ -33,6 +33,31 @@ GPS(113.902, -22.502, 18) BAROMETER:40.0
 """
 
 
+# Mavic Pro style: "GPS (" with a space, distance D and height H in metres.
+MAVIC_PRO = """1
+00:00:00,000 --> 00:00:01,000
+GPS (8.6234, 47.3828, 19), D 2.53m, H 6.80m, H.S 0.00m/s, V.S 0.00m/s
+
+2
+00:00:01,000 --> 00:00:02,000
+GPS (8.6235, 47.3829, 19), D 2.60m, H 7.10m, H.S 0.50m/s, V.S 0.10m/s
+"""
+
+# Mavic Air 2 / Mini 2 firmware: "longtitude" (sic) and an "altitude" that may be absolute.
+AIR2 = """1
+00:00:00,000 --> 00:00:00,033
+<font size="36">FrameCnt : 1, DiffTime : 33ms
+2021-03-21 12:41:26,079,288
+[iso : 100] [shutter : 1/1000.0] [fnum : 280] [ev : 0] [ct : 5500] [color_md : default] [focal_len : 240] [latitude: 47.382800] [longtitude: 8.623400] [altitude: 431.500000] </font>
+
+2
+00:00:00,033 --> 00:00:00,066
+<font size="36">FrameCnt : 2, DiffTime : 33ms
+2021-03-21 12:41:26,112,621
+[iso : 100] [shutter : 1/1000.0] [fnum : 280] [ev : 0] [ct : 5500] [color_md : default] [focal_len : 240] [latitude: 47.382810] [longtitude: 8.623410] [altitude: 431.600000] </font>
+"""
+
+
 def _frame(ts: float) -> Frame:
     return Frame(np.zeros((2, 2, 3), np.uint8), ts, datetime(2024, 1, 1), 0)
 
@@ -48,11 +73,58 @@ def test_parse_new_format():
     assert len(poses) == 2
     p = poses[0]
     assert (p.ts, p.lat, p.lon, p.alt_agl_m) == (0.0, 22.5, 113.9, 50.2)
-    assert (p.yaw_deg, p.cam_pitch_deg, p.cam_roll_deg) == (30.0, -45.0, 2.0)
+    assert (p.yaw_deg, p.cam_pitch_deg, p.cam_roll_deg) == (10.0, -45.0, 2.0)  # gb_yaw wins
     q = poses[1]
     assert q.ts == 1.0
     assert (q.lat, q.lon, q.alt_agl_m) == (-22.6, -113.8, 51.0)
-    assert q.yaw_deg == 15.0  # no [yaw]: falls back to gb_yaw
+    assert q.yaw_deg == 15.0
+
+
+def test_drone_yaw_used_without_gimbal_yaw():
+    poses = parse_srt(NEW.replace("gb_yaw: 10.0 ", ""))
+    assert (poses[0].yaw_deg, poses[0].yaw_assumed) == (30.0, False)
+
+
+def test_parse_mavic_pro_gps_with_space():
+    poses = parse_srt(MAVIC_PRO)
+    assert len(poses) == 2
+    p = poses[0]
+    assert (p.lat, p.lon, p.alt_agl_m) == (47.3828, 8.6234, 6.80)  # H, not D or the 19
+    assert (p.pitch_assumed, p.yaw_assumed, p.alt_assumed) == (True, True, False)
+    assert poses[1].ts == 1.0 and poses[1].alt_agl_m == 7.10
+
+
+def test_parse_air2_longtitude_and_altitude(caplog):
+    with caplog.at_level(logging.INFO):
+        poses = parse_srt(AIR2)
+    assert len(poses) == 2
+    p = poses[0]
+    assert (p.lat, p.lon, p.alt_agl_m) == (47.3828, 8.6234, 431.5)
+    assert p.alt_assumed and poses[1].alt_assumed
+    notes = [r.getMessage() for r in caplog.records if "altitude" in r.getMessage()]
+    assert len(notes) == 1 and "absolute" in notes[0]
+
+
+def test_altitude_only_as_last_resort():
+    measured = AIR2.replace("[altitude: 431.500000]", "[rel_alt: 40.000 abs_alt: 431.5] [altitude: 431.5]")
+    p = parse_srt(measured)[0]
+    assert (p.alt_agl_m, p.alt_assumed) == (40.0, False)
+    with_h = MAVIC_PRO.replace("H 6.80m,", "H 6.80m, [altitude: 99.0],")
+    p = parse_srt(with_h)[0]
+    assert (p.alt_agl_m, p.alt_assumed) == (6.80, False)
+
+
+def test_null_island_positions_skipped():
+    # DJI writes 0, 0 before the GPS has a fix
+    no_fix = NEW.replace("[latitude: 22.500000] [longitude: 113.900000]",
+                         "[latitude: 0.000000] [longitude: 0.000000]")
+    poses = parse_srt(no_fix)
+    assert [p.ts for p in poses] == [1.0]
+    legacy = parse_srt(LEGACY.replace("GPS(113.901, 22.501, 18)", "GPS(0.0, 0.0, 0)"))
+    assert [p.ts for p in legacy] == [0.033]
+    # only both zero means "no fix": the equator or the prime meridian alone is real
+    on_equator = parse_srt(NEW.replace("[latitude: 22.500000]", "[latitude: 0.000000]"))
+    assert on_equator[0].lat == 0.0
 
 
 def test_parse_legacy_format():
@@ -171,6 +243,40 @@ def test_missing_file_is_stale(tmp_path, caplog):
     assert t.latest() is None
     assert t.track(5.0) == []
     assert any("nope.SRT" in r.getMessage() for r in caplog.records)
+    assert str(tmp_path) not in caplog.text and tmp_path.name not in caplog.text
+
+
+def test_load_logs_positions_and_span_by_file_name(tmp_path, caplog):
+    t = DjiSrtTelemetry(_write(tmp_path, NEW), max_age_s=0.5)
+    with caplog.at_level(logging.INFO, logger="engine.telemetry.dji_srt"):
+        t.load()
+    assert "SRT flight.SRT: 2 positions over 2.0 s" in caplog.text
+    assert str(tmp_path) not in caplog.text and tmp_path.name not in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_unrecognised_format_warns(tmp_path, caplog):
+    text = ("1\n00:00:00,000 --> 00:00:01,000\nISO 100 EV 0\n\n"
+            "2\n00:00:01,000 --> 00:00:02,000\nISO 100 EV 0\n\n"
+            "3\n00:00:02,000 --> 00:00:03,000\nISO 100 EV 0\n")
+    t = DjiSrtTelemetry(_write(tmp_path, text), max_age_s=0.5)
+    with caplog.at_level(logging.INFO, logger="engine.telemetry.dji_srt"):
+        t.load()
+    assert t.state == "stale"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        "SRT flight.SRT: none of the 3 subtitle blocks had a position — format not recognised"]
+    assert str(tmp_path) not in caplog.text
+
+
+def test_state_is_stale_when_playback_runs_past_the_log(tmp_path):
+    t = DjiSrtTelemetry(_write(tmp_path, NEW), max_age_s=0.5)
+    t.load()
+    assert t.state == "ok"
+    assert t.pose_for(_frame(0.2)) is not None and t.state == "ok"
+    assert t.pose_for(_frame(5.0)) is None
+    assert t.state == "stale"
+    assert t.pose_for(_frame(0.9)) is not None and t.state == "ok"
 
 
 def test_load_is_synchronous_and_idempotent(tmp_path):

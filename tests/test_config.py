@@ -383,6 +383,23 @@ def test_telemetry_connection_rejects_non_udp_serial(tmp_path, conn):
         load_config(p)
 
 
+@pytest.mark.parametrize("ttype", ["none", "dji_srt"])
+def test_telemetry_connection_ignored_unless_mavlink(tmp_path, ttype):
+    # a leftover link under another type must not stop the engine from starting
+    _video(tmp_path)
+    (tmp_path / "flight.srt").write_text("x")
+    p = _write(tmp_path, "source:\n  path: flight.mp4\n"
+               f"telemetry:\n  type: {ttype}\n  connection: 'tcp:127.0.0.1:5760'\n")
+    assert load_config(p).telemetry.type == ttype
+
+
+@pytest.mark.parametrize("conn", ["udpout:10.0.0.2:14550", "udpbcast:192.168.1.255:14550"])
+def test_telemetry_connection_rejects_sending_udp(tmp_path, conn):
+    p = _write(tmp_path, f"telemetry:\n  type: mavlink\n  connection: '{conn}'\n")
+    with pytest.raises(ConfigError, match=r"telemetry\.connection.*only listens"):
+        load_config(p)
+
+
 @pytest.mark.parametrize("conn", ["udpin:0.0.0.0:14550", "COM5,57600", "/dev/ttyACM0"])
 def test_telemetry_connection_accepts_udp_serial(tmp_path, conn):
     p = _write(tmp_path, f"telemetry:\n  type: mavlink\n  connection: '{conn}'\n")

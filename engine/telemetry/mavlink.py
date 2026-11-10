@@ -1,6 +1,7 @@
 """Live MAVLink telemetry (PX4/ArduPilot over UDP or serial)."""
 from __future__ import annotations
 
+import errno
 import logging
 import math
 import os
@@ -25,9 +26,50 @@ _TRACK_CAPACITY = 1800  # 30 minutes at one pose per second
 _HDG_UNKNOWN = 65535
 
 
-def _scheme(connection: str) -> str:
-    """Only the part before the first ':' - the rest may carry credentials."""
-    return connection.split(":", 1)[0]
+_WSAEADDRINUSE = 10048
+_WSAEACCES = 10013
+_ERROR_ACCESS_DENIED = 5
+_ERROR_FILE_NOT_FOUND = 2
+
+
+def _kind(connection: str) -> str:
+    """"udp"/"udpin" or "serial": never the address, port or port name."""
+    return connection.split(":", 1)[0].lower() if connection[:3].lower() == "udp" else "serial"
+
+
+def _hint(exc: BaseException, num: object, win: object, serial: bool) -> str | None:
+    if serial:
+        # pyserial on Windows names the cause only inside its message: it is looked
+        # at here, never logged (it holds the port name)
+        try:
+            text = str(exc)
+        except Exception:  # noqa: BLE001
+            text = ""
+        if (isinstance(exc, PermissionError) or num in (errno.EACCES, errno.EBUSY)
+                or win == _ERROR_ACCESS_DENIED or "PermissionError" in text
+                or "Access is denied" in text):
+            return "serial port is open in another program"
+        if (isinstance(exc, FileNotFoundError) or num == errno.ENOENT
+                or win == _ERROR_FILE_NOT_FOUND or "FileNotFoundError" in text):
+            return "serial port not found - check the port name"
+        return None
+    if num in (errno.EADDRINUSE, _WSAEADDRINUSE) or win == _WSAEADDRINUSE:
+        return "UDP port already in use — is a ground station listening on it?"
+    if num == _WSAEACCES or win == _WSAEACCES:
+        return "UDP port blocked - another program holds it"
+    return None
+
+
+def _failure(exc: BaseException, connection: str) -> str:
+    """The exception type, its error numbers and a hint; never str(exc), which may
+    carry the connection string."""
+    num, win = getattr(exc, "errno", None), getattr(exc, "winerror", None)
+    codes = [f"errno {num}"] if isinstance(num, int) else []
+    if isinstance(win, int) and win != num:
+        codes.append(f"winerror {win}")
+    text = type(exc).__name__ + (f" ({', '.join(codes)})" if codes else "")
+    hint = _hint(exc, num, win, _kind(connection) == "serial")
+    return f"{text}: {hint}" if hint else text
 
 
 def _norm_yaw(deg: float) -> float:
@@ -119,8 +161,8 @@ class MavlinkTelemetry:
             except Exception as e:  # noqa: BLE001 - telemetry must never stop detection
                 if stop.is_set():
                     break
-                log.warning("MAVLink %s connection failed: %s", _scheme(self._connection),
-                            type(e).__name__)
+                log.warning("MAVLink %s connection failed: %s", _kind(self._connection),
+                            _failure(e, self._connection))
                 self._close_conn()
                 stop.wait(self._backoff.next_delay())
         self._close_conn()

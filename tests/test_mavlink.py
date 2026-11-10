@@ -1,3 +1,4 @@
+import errno
 import math
 import os
 import socket
@@ -222,6 +223,68 @@ def test_reconnects_after_error_without_leaking_connection_string(caplog):
     t.stop()  # idempotent
 
 
+class _WinSockInUse(OSError):
+    winerror = 10048  # WSAEADDRINUSE, as Windows reports it
+
+
+def _serial_error(text):
+    import serial
+
+    return serial.SerialException(text)
+
+
+@pytest.mark.parametrize("conn, make_exc, kind, hint", [
+    ("udpin:127.0.0.1:14550", lambda: OSError(errno.EADDRINUSE, "secret-text"), "udpin",
+     "UDP port already in use — is a ground station listening on it?"),
+    ("udpin:0.0.0.0:14550", lambda: _WinSockInUse("secret-text"), "udpin",
+     "UDP port already in use — is a ground station listening on it?"),
+    ("COM5,57600", lambda: PermissionError(errno.EACCES, "secret-text"), "serial",
+     "serial port is open in another program"),
+    # pyserial on Windows: the cause is only inside the message
+    ("COM5", lambda: _serial_error(
+        "could not open port 'COM5': PermissionError(13, 'Access is denied.', None, 5)"),
+     "serial", "serial port is open in another program"),
+    ("COM7", lambda: _serial_error(
+        "could not open port 'COM7': FileNotFoundError(2, 'The system cannot find the file "
+        "specified.', None, 2)"), "serial", "serial port not found"),
+])
+def test_connection_failure_logs_a_hint_but_no_details(conn, make_exc, kind, hint, caplog):
+    calls = []
+
+    def factory(c):
+        calls.append(c)
+        raise make_exc()
+
+    t = MavlinkTelemetry(conn, 0.5, 2.0, conn_factory=factory, backoff_initial=0.05)
+    with caplog.at_level("WARNING"):
+        t.start()
+        try:
+            assert wait_for(lambda: len(calls) >= 1 and "connection failed" in caplog.text)
+        finally:
+            t.stop()
+    line = next(r.getMessage() for r in caplog.records if "connection failed" in r.getMessage())
+    assert line.startswith(f"MAVLink {kind} connection failed: ")
+    assert hint in line
+    for secret in ("secret-text", "COM5", "COM7", "14550", "127.0.0.1", "0.0.0.0", "57600",
+                   "Access is denied", "could not open"):
+        assert secret not in caplog.text
+
+
+def test_connection_failure_shows_the_error_number(caplog):
+    def factory(c):
+        raise OSError(errno.EADDRINUSE, "secret-text")
+
+    t = MavlinkTelemetry("udpin:127.0.0.1:14550", 0.5, 2.0, conn_factory=factory,
+                         backoff_initial=0.05)
+    with caplog.at_level("WARNING"):
+        t.start()
+        try:
+            assert wait_for(lambda: "connection failed" in caplog.text)
+        finally:
+            t.stop()
+    assert f"OSError (errno {errno.EADDRINUSE})" in caplog.text
+
+
 def test_udp_loopback_real_messages():
     from pymavlink import mavutil
 
@@ -352,11 +415,18 @@ def test_rejects_non_udp_serial_connection(conn):
 
 
 @pytest.mark.parametrize("conn", [
-    "udpin:0.0.0.0:14550", "udp:127.0.0.1:1", "udpout:10.0.0.2:14550",
-    "udpbcast:192.168.1.255:14550", "COM5", "com12,57600", "/dev/ttyUSB0,115200",
+    "udpin:0.0.0.0:14550", "udp:127.0.0.1:1", "COM5", "com12,57600", "/dev/ttyUSB0,115200",
 ])
 def test_accepts_udp_and_serial_connection(conn):
     MavlinkTelemetry(conn, 0.5, 2.0, conn_factory=lambda c: None)
+
+
+@pytest.mark.parametrize("conn", ["udpout:10.0.0.2:14550", "udpbcast:192.168.1.255:14550"])
+def test_rejects_sending_udp_schemes(conn):
+    # sky-eye only listens: with an outbound link the drone never learns where to send
+    with pytest.raises(ValueError, match=r"telemetry\.connection.*only listens") as e:
+        MavlinkTelemetry(conn, 0.5, 2.0, conn_factory=lambda c: None)
+    assert "10.0.0.2" not in str(e.value) and "192.168" not in str(e.value)
 
 
 def test_serial_connection_fails_with_oserror_not_missing_module():
