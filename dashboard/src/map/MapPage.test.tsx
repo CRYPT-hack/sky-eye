@@ -145,6 +145,12 @@ test("creates the map with the engine's tile url, attribution and media helper",
   expect(screen.getByRole("region", { name: "Map" })).toBe(el);
 });
 
+test("the attribution comes from the engine when it sends one", async () => {
+  setup({ info: { ...INFO, map_tile_attribution: "Tiles © Example <b>" } });
+  await waitFor(() => expect(h.created).toHaveLength(1));
+  expect(h.created[0].opts.attribution).toBe("Tiles © Example <b>"); // escaped by the view
+});
+
 test("passes every truck to the map and counts the ones it cannot draw", async () => {
   const ok = located(1);
   const rough = located(2, { geo_status: "unreliable", geo_error_m: 90 });
@@ -212,6 +218,14 @@ test("drone track updates from live messages", async () => {
   ]);
 });
 
+test("a recorded flight's position has no time", async () => {
+  const { live } = setup({ telemetry: { state: "ok", latest: FIX, track: [] } });
+  await waitFor(() => expect(lastDrone().latest).toEqual(FIX));
+  const noTime: DronePosition = { ...FIX, lat: 13, t_iso: null };
+  act(() => live.send({ type: "telemetry", latest: noTime }));
+  expect(lastDrone().latest).toEqual(noTime);
+});
+
 test("a live telemetry message without a position leaves the track alone", async () => {
   const { live } = setup({ telemetry: { state: "ok", latest: FIX, track: [[12.5, 77.5]] } });
   await waitFor(() => expect(lastDrone().latest).toEqual(FIX));
@@ -243,6 +257,18 @@ test("tile error shows offline notice", async () => {
     onTileError();
   });
   expect(screen.getAllByText("Map tiles unavailable — showing points only")).toHaveLength(1);
+});
+
+test("the tile notice goes away when tiles load again", async () => {
+  setup();
+  await waitFor(() => expect(h.created).toHaveLength(1));
+  const { onTileError, onTileLoad } = h.created[0].opts as Record<string, () => void>;
+  act(() => onTileError());
+  expect(screen.getByText("Map tiles unavailable — showing points only")).toBeInTheDocument();
+  act(() => onTileLoad());
+  expect(
+    screen.queryByText("Map tiles unavailable — showing points only"),
+  ).not.toBeInTheDocument();
 });
 
 test("stale and waiting drone data are called out", async () => {
@@ -376,6 +402,62 @@ test("marker colours are planned again every minute", async () => {
   act(() => tick());
   expect(h.view.setTrucks).toHaveBeenCalledTimes(before + 1);
   expect(h.view.setTrucks.mock.calls.at(-1)?.[1]).toEqual(new Date(2026, 10, 6, 13, 0, 0));
+  timers.mockRestore();
+});
+
+function minuteTick(timers: { mock: { calls: unknown[][] } }): () => void {
+  const tick = timers.mock.calls.find((c) => c[1] === 60_000)?.[0];
+  expect(typeof tick).toBe("function");
+  return tick as () => void;
+}
+
+test("today's range moves on at midnight on a page left open", async () => {
+  vi.setSystemTime(new Date(2026, 10, 6, 23, 59, 30));
+  const timers = vi.spyOn(globalThis, "setInterval");
+  const { c, live } = setup({ trucks: () => [located(1)] });
+  await loaded([1]);
+  expect(c.listTrucks).toHaveBeenLastCalledWith({ ...TODAY, limit: 200, offset: 0 });
+  const tick = minuteTick(timers);
+
+  const tomorrow = localDayRange("2026-11-07", "2026-11-07");
+  const early = located(2, { first_seen: new Date(2026, 10, 7, 0, 0, 10).toISOString() });
+  c.listTrucks.mockImplementation(async () => ({ trucks: [early], limit: 200, offset: 0 }));
+  vi.setSystemTime(new Date(2026, 10, 7, 0, 0, 30));
+  act(() => tick());
+  await loaded([2]);
+  expect(c.listTrucks).toHaveBeenLastCalledWith({ ...tomorrow, limit: 200, offset: 0 });
+  expect(screen.getByLabelText("From")).toHaveValue("2026-11-07");
+  expect(screen.getByLabelText("To")).toHaveValue("2026-11-07");
+  // live trucks of the new day are in range again
+  const late = located(3, { first_seen: new Date(2026, 10, 7, 0, 1, 0).toISOString() });
+  act(() => live.send({ type: "truck.new", truck: late }));
+  await loaded([2, 3]);
+  timers.mockRestore();
+});
+
+test("a range the user picked stays at midnight", async () => {
+  const user = userEvent.setup();
+  vi.setSystemTime(new Date(2026, 10, 6, 23, 59, 0));
+  const timers = vi.spyOn(globalThis, "setInterval");
+  const { c } = setup({ trucks: () => [located(1)] });
+  await loaded([1]);
+  const tick = minuteTick(timers);
+  await user.clear(screen.getByLabelText("From"));
+  await user.type(screen.getByLabelText("From"), "2026-11-05");
+  await user.click(screen.getByRole("button", { name: "Apply" }));
+  await waitFor(() =>
+    expect(c.listTrucks).toHaveBeenLastCalledWith({
+      ...localDayRange("2026-11-05", "2026-11-06"),
+      limit: 200,
+      offset: 0,
+    }),
+  );
+  const calls = c.listTrucks.mock.calls.length;
+  vi.setSystemTime(new Date(2026, 10, 7, 0, 0, 30));
+  act(() => tick());
+  expect(c.listTrucks).toHaveBeenCalledTimes(calls);
+  expect(screen.getByLabelText("From")).toHaveValue("2026-11-05");
+  expect(screen.getByLabelText("To")).toHaveValue("2026-11-06");
   timers.mockRestore();
 });
 

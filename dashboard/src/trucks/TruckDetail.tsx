@@ -99,7 +99,7 @@ function LocationValue({ truck: t }: { truck: Truck }) {
   if (t.geo_status === "unreliable") {
     return latitude !== null && longitude !== null
       ? `Approximate: ${latitude.toFixed(5)}, ${longitude.toFixed(5)}${error}`
-      : "Not reliable (camera too close to the horizon)";
+      : "Not reliable (camera angle or height unknown or too shallow)";
   }
   return "Unknown";
 }

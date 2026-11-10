@@ -342,7 +342,9 @@ test("location of an unreliable truck with a position is approximate, without a 
 test("location of an unreliable truck without a position explains why", async () => {
   setup(makeTruck(5, { geo_status: "unreliable", lat: null, lon: null, ...OLD }));
   await screen.findByAltText("Truck #5 full frame");
-  expect(row()).toHaveTextContent("Not reliable (camera too close to the horizon)");
+  expect(row()).toHaveTextContent(
+    "Not reliable (camera angle or height unknown or too shallow)",
+  );
 });
 
 test("location is Unknown for unknown or missing geo status", async () => {

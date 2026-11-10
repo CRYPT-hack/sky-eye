@@ -65,6 +65,8 @@ export interface Info {
   telemetry?: "none" | "mavlink" | "dji_srt";
   /** Map tile URL template (`{z}/{x}/{y}`); absent on engines that predate the map. */
   map_tile_url?: string;
+  /** Credit for the map tiles, plain text; absent on older engines (OpenStreetMap). */
+  map_tile_attribution?: string;
 }
 
 /** The drone's position at one moment. */
@@ -73,7 +75,8 @@ export interface DronePosition {
   lon: number;
   alt_agl_m: number | null;
   yaw_deg: number | null;
-  t_iso: string;
+  /** When the position was received; null for a recorded flight (DJI log). */
+  t_iso: string | null;
 }
 
 /** `GET /api/telemetry`: the latest position and a recent track of `[lat, lon]` points. */

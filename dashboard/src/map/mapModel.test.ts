@@ -2,8 +2,12 @@ import { describe, expect, test } from "vitest";
 import { makeTruck } from "../live/fakes";
 import {
   AGE_COLORS,
+  ATTRIBUTION_URL,
+  DEFAULT_TILE_URL,
   MAX_TRACK_POINTS,
   ageBucket,
+  attributionHtml,
+  escapeHtml,
   layerState,
   reconcileMarkers,
   type LayerState,
@@ -57,8 +61,15 @@ describe("planMarkers", () => {
   test("renders ok and unreliable trucks differently", () => {
     const plan = planMarkers([ok, rough], NOW);
     expect(plan).toEqual([
-      { kind: "point", truck: ok, lat: 12.5, lon: 77.5, color: AGE_COLORS.recent },
+      { kind: "point", truck: ok, lat: 12.5, lon: 77.5, radiusM: 4.2, color: AGE_COLORS.recent },
       { kind: "area", truck: rough, lat: 12.6, lon: 77.6, radiusM: 180, color: AGE_COLORS.older },
+    ]);
+  });
+
+  test("a reliable truck without an error radius is still a point", () => {
+    const bare = { ...ok, geo_error_m: null };
+    expect(planMarkers([bare], NOW)).toEqual([
+      { kind: "point", truck: bare, lat: 12.5, lon: 77.5, radiusM: null, color: AGE_COLORS.recent },
     ]);
   });
 
@@ -142,11 +153,37 @@ describe("reconcileMarkers", () => {
     ]);
   });
 
+  test("a new error radius on a reliable truck redraws it", () => {
+    const drawn = drawnFrom([a], NOW);
+    const wider = { ...a, geo_error_m: 40 };
+    expect(reconcileMarkers(drawn, planMarkers([wider], NOW))).toEqual([
+      { action: "replace", plan: expect.objectContaining({ truck: wider, radiusM: 40 }) },
+    ]);
+  });
+
   test("a new age bucket only recolours", () => {
     const drawn = drawnFrom([a], NOW);
     const later = new Date(2026, 10, 6, 13, 0, 0);
     expect(reconcileMarkers(drawn, planMarkers([a], later))).toEqual([
       { action: "recolor", plan: expect.objectContaining({ color: AGE_COLORS.today }) },
     ]);
+  });
+});
+
+describe("attribution", () => {
+  test("is escaped, plain text", () => {
+    expect(escapeHtml(`<img src=x onerror="a()">&'`)).toBe(
+      "&lt;img src=x onerror=&quot;a()&quot;&gt;&amp;&#39;",
+    );
+    expect(attributionHtml("Tiles <b>Esri</b>", "https://tiles.example/{z}/{x}/{y}.png")).toBe(
+      "Tiles &lt;b&gt;Esri&lt;/b&gt;",
+    );
+  });
+
+  test("links to the OpenStreetMap copyright page only for the OpenStreetMap tiles", () => {
+    expect(attributionHtml("© OpenStreetMap contributors", DEFAULT_TILE_URL)).toBe(
+      `<a href="${ATTRIBUTION_URL}" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a>`,
+    );
+    expect(attributionHtml("<x>", DEFAULT_TILE_URL)).toContain(">&lt;x&gt;</a>");
   });
 });

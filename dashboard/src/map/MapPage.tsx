@@ -64,9 +64,12 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
   const [from, setFrom] = useState(localToday);
   const [to, setTo] = useState(from);
   const [applied, setApplied] = useState({ from, to });
+  /** The range is "today" and moves on at midnight, until the user changes a date. */
+  const followsToday = useRef(true);
 
   const [info, setInfo] = useState<Info | null>(null);
   const [tileUrl, setTileUrl] = useState<string | null>(null);
+  const [tileAttribution, setTileAttribution] = useState(ATTRIBUTION_TEXT);
   const [status, setStatus] = useState<Status | null>(null);
   const [trucks, setTrucks] = useState<Truck[]>([]);
   const [loading, setLoading] = useState(true);
@@ -103,6 +106,7 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
         if (cancelled) return;
         setInfo(i);
         setTileUrl(i.map_tile_url || DEFAULT_TILE_URL);
+        setTileAttribution(i.map_tile_attribution ?? ATTRIBUTION_TEXT);
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -221,21 +225,32 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
     if (!el || tileUrl === null) return;
     const v = createMapView(el, {
       tileUrl,
-      attribution: ATTRIBUTION_TEXT,
+      attribution: tileAttribution,
       mediaUrl: client.mediaUrl,
       onTileError: () => setTilesFailed(true),
+      onTileLoad: () => setTilesFailed(false),
     });
     setView(v);
     return () => {
       v.destroy();
       setView(null);
     };
-  }, [client, tileUrl]);
+  }, [client, tileUrl, tileAttribution]);
 
   useEffect(() => {
     const id = setInterval(() => setClock((n) => n + 1), RECOLOR_MS);
     return () => clearInterval(id);
   }, []);
+
+  // A page left open past midnight: "today" moves on with the minute tick (unless the
+  // user picked a range), so live trucks of the new day are in range again.
+  useEffect(() => {
+    if (!followsToday.current) return;
+    const today = localToday();
+    setFrom(today);
+    setTo(today);
+    setApplied((cur) => (cur.from === today && cur.to === today ? cur : { from: today, to: today }));
+  }, [clock]);
 
   useEffect(() => {
     view?.setTrucks(trucks, new Date());
@@ -270,7 +285,10 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
             type="date"
             value={from}
             max={to || undefined}
-            onChange={(e) => setFrom(e.target.value)}
+            onChange={(e) => {
+              followsToday.current = false;
+              setFrom(e.target.value);
+            }}
           />
         </div>
         <div className="field">
@@ -283,7 +301,10 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
             type="date"
             value={to}
             min={from || undefined}
-            onChange={(e) => setTo(e.target.value)}
+            onChange={(e) => {
+              followsToday.current = false;
+              setTo(e.target.value);
+            }}
           />
         </div>
         <button type="submit" className="button button--primary">
@@ -335,8 +356,9 @@ export default function MapPage({ connect = connectLive }: { connect?: typeof co
         ))}
       </ul>
       <p className="field-hint">
-        Dashed circles are approximate locations (the ring is the error). The green dot is the
-        drone and its recent track.
+        A dot is a reliable location, with a faint circle for its error. Dashed circles are
+        approximate locations (the ring is the error). The green dot is the drone and its
+        recent track.
       </p>
       {unlocated > 0 && <p className="muted">{unlocatedNote(unlocated)}</p>}
     </>

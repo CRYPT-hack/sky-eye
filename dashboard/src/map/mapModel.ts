@@ -43,19 +43,42 @@ export function ageBucket(iso: string, now: Date): AgeBucket {
   return sameDay ? "today" : "older";
 }
 
+/** Text for the attribution control, which Leaflet shows as HTML: never raw config text. */
+export function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** The tile credit as safe HTML; linked to the OpenStreetMap copyright page only for its tiles. */
+export function attributionHtml(text: string, tileUrl: string): string {
+  const safe = escapeHtml(text);
+  return tileUrl === DEFAULT_TILE_URL
+    ? `<a href="${ATTRIBUTION_URL}" target="_blank" rel="noopener noreferrer">${safe}</a>`
+    : safe;
+}
+
 export type MarkerPlan =
-  | { kind: "point"; truck: Truck; lat: number; lon: number; color: string }
+  /** A reliable fix: a filled point, with its error circle when it has a radius. */
+  | { kind: "point"; truck: Truck; lat: number; lon: number; radiusM: number | null; color: string }
+  /** An unreliable fix: only the circle where it may be. */
   | { kind: "area"; truck: Truck; lat: number; lon: number; radiusM: number; color: string };
 
 /**
- * How one truck is drawn: a filled point for a reliable fix, an uncertainty circle for an
- * unreliable one. A truck with no usable position is not drawn at all (null).
+ * How one truck is drawn: a filled point (with its error circle) for a reliable fix, an
+ * uncertainty circle for an unreliable one. A truck with no usable position is not drawn
+ * at all (null).
  */
 export function planMarker(truck: Truck, now: Date): MarkerPlan | null {
   const { lat, lon } = truck;
   if (lat === null || lon === null) return null;
   const color = AGE_COLORS[ageBucket(truck.first_seen, now)];
-  if (truck.geo_status === "ok") return { kind: "point", truck, lat, lon, color };
+  if (truck.geo_status === "ok") {
+    return { kind: "point", truck, lat, lon, radiusM: truck.geo_error_m, color };
+  }
   if (truck.geo_status === "unreliable" && truck.geo_error_m !== null) {
     return { kind: "area", truck, lat, lon, radiusM: truck.geo_error_m, color };
   }
@@ -93,7 +116,7 @@ export interface LayerState {
 
 function shapeKey(plan: MarkerPlan): string {
   const t = plan.truck;
-  const radius = plan.kind === "area" ? plan.radiusM : "";
+  const radius = plan.radiusM ?? "";
   return [plan.kind, plan.lat, plan.lon, radius, t.crop_url, t.first_seen, t.best_score].join("|");
 }
 
