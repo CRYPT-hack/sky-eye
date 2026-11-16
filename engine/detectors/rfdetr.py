@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import numpy as np
 
 from engine.config import DetectorConfig
 from engine.core import Detection
+from engine.detectors.filtering import filter_detections
 
 log = logging.getLogger(__name__)
 
@@ -98,18 +100,34 @@ class RFDETRDetector:
                     log.warning("optimize_for_inference failed: %s", exc)
         self._model = model
 
-    def detect(self, image_bgr: np.ndarray) -> list[Detection]:
+    def detect_raw(
+        self, image_bgr: np.ndarray, floor: float, class_names: Sequence[str]
+    ) -> list[Detection]:
+        """Every detection of the named COCO classes with score >= floor."""
+        from rfdetr.assets.coco_classes import COCO_CLASSES
+
+        name_to_id = {name: int(cid) for cid, name in COCO_CLASSES.items()}
+        unknown = [c for c in class_names if c not in name_to_id]
+        if unknown:
+            raise DetectorError(f"unknown class names {unknown}; must be COCO class names")
+        id_to_name = {name_to_id[c]: c for c in class_names}
+
         rgb = np.ascontiguousarray(image_bgr[..., ::-1])
-        dets = self._model.predict(rgb, threshold=self.confidence, include_source_image=False)
+        dets = self._model.predict(rgb, threshold=floor, include_source_image=False)
         out: list[Detection] = []
         if dets.class_id is None or dets.confidence is None:
             return out
         for box, score, cid in zip(dets.xyxy, dets.confidence, dets.class_id):
-            name = self._id_to_name.get(int(cid))
+            name = id_to_name.get(int(cid))
             if name is None:
                 continue
             out.append(Detection(tuple(float(v) for v in box), float(score), name))
         return out
+
+    def detect(self, image_bgr: np.ndarray) -> list[Detection]:
+        classes = list(self._id_to_name.values())
+        raw = self.detect_raw(image_bgr, self.confidence, classes)
+        return filter_detections(raw, classes, self.confidence)
 
 
 def build_detector(cfg: DetectorConfig) -> RFDETRDetector:
