@@ -143,7 +143,7 @@ Update this table at the end of every working session.
 | Plan 1: engine core | Merged |
 | Plan 2: dashboard (Live, Trucks, Status) | Merged (PR #5) |
 | Plan 3: alerts + live drone input | Merged (PRs #7, #8) |
-| Plan 5: GPS + map | **In progress**: branch `plan5-gps-map`, all 7 tasks done and reviewed, final fix wave about 90% done (see 5.3) |
+| Plan 5: GPS + map | **Done, PR open** (17 Nov): branch `plan5-gps-map`, final review fixed and re-reviewed; waiting for the owner to merge. Leftovers in `plan5-followups.md` |
 | Plan 4A: tracking you can trust | **Not started. Next after Plan 5. Top priority.** |
 | Plan 4: train the detector on aerial footage | Not started |
 | Plan 6: speed, options, results file | Not started |
@@ -164,7 +164,9 @@ Update this table at the end of every working session.
 | 7 | Trucks appear on the map with an error radius | Plan 5; passes its tests; not yet seen with a real flight log |
 | 8 | All tests pass | See 5.3 for the latest run |
 
-### 5.3 How to finish Plan 5 (do this first)
+### 5.3 How Plan 5 was finished (history; done on 17 Nov 2026)
+
+On 17 Nov the remaining README and config items were finished. A scoped re-review approved all 16 fix items. All suites passed: engine 474, dashboard 220, typecheck, build, and the end-to-end test 3 times in a row. The pull request was opened. **Your first job is now Step 2 (section 7), after the owner merges the Plan 5 PR.** The notes below are kept for the record.
 
 State on disk:
 
