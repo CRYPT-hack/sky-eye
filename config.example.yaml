@@ -57,10 +57,12 @@ api:
   stream_fps: 15
   stream_max_width: 1280
   map_tile_url: https://tile.openstreetmap.org/{z}/{x}/{y}.png   # needs {z} {x} {y}
+  # map_tile_attribution: "© OpenStreetMap contributors"   # credit line for another tile server; no secret keys in map_tile_url
 
 # Truck locations on a map (see README "GPS & map"). Default: no telemetry.
 camera:
   hfov_deg: 82.0        # horizontal field of view of the video, in degrees
+  # pitch_deg: -90     # default: unset. Fixed camera angle (-90 down .. 0 level), used only when the DJI log has none
 
 telemetry:
   type: none            # none | mavlink | dji_srt
