@@ -9,3 +9,6 @@ samples/
 dashboard/node_modules/
 dashboard/dist/
 config.yaml
+eval/cache/
+eval/review/
+eval/runs/
