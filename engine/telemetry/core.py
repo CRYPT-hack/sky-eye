@@ -20,6 +20,11 @@ class DronePose:
     yaw_deg: float  # clockwise from true north
     cam_pitch_deg: float  # -90 = straight down
     cam_roll_deg: float = 0.0
+    # True when the source had no reading and filled in a default (the location is then
+    # not trusted as "ok"; see engine.geo.geolocate)
+    pitch_assumed: bool = False
+    yaw_assumed: bool = False
+    alt_assumed: bool = False
 
 
 class PoseBuffer:

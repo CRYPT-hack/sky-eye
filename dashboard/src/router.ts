@@ -1,7 +1,7 @@
 import { useMemo, useSyncExternalStore } from "react";
 
 /** The pages of the dashboard. Routes live in the URL hash, so the engine needs no server-side routing. */
-export type Route = { page: "live" } | { page: "trucks" } | { page: "truck"; id: number } | { page: "status" };
+export type Route = { page: "live" } | { page: "trucks" } | { page: "truck"; id: number } | { page: "map" } | { page: "status" };
 
 const TRUCK_ID = /^[0-9]+$/;
 
@@ -21,6 +21,8 @@ export function parseHash(hash: string): Route {
       }
       return { page: "trucks" };
     }
+    case "map":
+      return { page: "map" };
     case "status":
       return { page: "status" };
     default:

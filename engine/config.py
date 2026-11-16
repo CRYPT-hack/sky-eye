@@ -166,6 +166,8 @@ class ApiConfig(_Model):
     stream_max_width: int = Field(default=1280, ge=16)
     dashboard_dir: Path | None = None  # None = <repo>/dashboard/dist
     map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    # plain text (the website escapes it); credit the tile provider of map_tile_url
+    map_tile_attribution: str = "© OpenStreetMap contributors"
 
     @field_validator("map_tile_url")
     @classmethod
@@ -227,14 +229,28 @@ class TelemetryConfig(_Model):
     max_age_s: float = Field(default=0.5, gt=0)
     stale_after_s: float = Field(default=2.0, gt=0)
 
-    @field_validator("connection")
-    @classmethod
-    def _udp_or_serial(cls, v: str) -> str:
-        return validate_connection(v)
+    @model_validator(mode="after")
+    def _udp_or_serial(self) -> TelemetryConfig:
+        # only checked when used: a leftover link under another type is harmless
+        if self.type != "mavlink":
+            return self
+        try:
+            validate_connection(self.connection)
+        except ValueError as e:
+            # keeps the field's loc, so the message names telemetry.connection
+            raise ValidationError.from_exception_data(
+                type(self).__name__,
+                [InitErrorDetails(type=PydanticCustomError("telemetry_connection", str(e)),
+                                  loc=("connection",), input=None)],
+            ) from None
+        return self
 
 
 class CameraConfig(_Model):
     hfov_deg: float = Field(default=82.0, ge=10, le=170)
+    # A fixed camera angle (-90 = straight down), used when the telemetry has no gimbal
+    # pitch; None = such locations are "unreliable"
+    pitch_deg: float | None = Field(default=None, ge=-90, le=0)
 
 
 def _sibling_srt(video: Path) -> Path | None:

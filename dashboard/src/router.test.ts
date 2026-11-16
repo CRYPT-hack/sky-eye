@@ -12,6 +12,8 @@ test("parseHash maps routes", () => {
   expect(parseHash("#/trucks/12")).toEqual({ page: "truck", id: 12 });
   expect(parseHash("#/trucks/abc")).toEqual({ page: "trucks" });
   expect(parseHash("#/status")).toEqual({ page: "status" });
+  expect(parseHash("#/map")).toEqual({ page: "map" });
+  expect(href({ page: "map" })).toBe("#/map");
   expect(parseHash("#/nope")).toEqual({ page: "live" });
 });
 

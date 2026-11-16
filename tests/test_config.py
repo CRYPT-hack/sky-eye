@@ -268,7 +268,9 @@ def test_telemetry_defaults(tmp_path):
     assert cfg.telemetry.srt_path is None
     assert cfg.telemetry.max_age_s == 0.5 and cfg.telemetry.stale_after_s == 2.0
     assert cfg.camera.hfov_deg == 82.0
+    assert cfg.camera.pitch_deg is None
     assert cfg.api.map_tile_url == "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    assert cfg.api.map_tile_attribution == "© OpenStreetMap contributors"
 
 
 @pytest.mark.parametrize(
@@ -279,6 +281,8 @@ def test_telemetry_defaults(tmp_path):
         ("camera:\n  hfov_deg: 5\n", r"camera\.hfov_deg"),
         ("camera:\n  hfov_deg: 171\n", r"camera\.hfov_deg"),
         ("telemetry:\n  type: gps\n", r"telemetry\.type"),
+        ("camera:\n  pitch_deg: -91\n", r"camera\.pitch_deg"),
+        ("camera:\n  pitch_deg: 1\n", r"camera\.pitch_deg"),
     ],
 )
 def test_telemetry_camera_bounds(tmp_path, body, field):
@@ -298,6 +302,17 @@ def test_telemetry_camera_bounds(tmp_path, body, field):
 def test_map_tile_url_rejected(tmp_path, url):
     with pytest.raises(ConfigError, match=r"api\.map_tile_url"):
         load_config(_write(tmp_path, f'api:\n  map_tile_url: "{url}"\n'))
+
+
+@pytest.mark.parametrize("value", [-90, -45.5, 0])
+def test_camera_pitch_accepted(tmp_path, value):
+    cfg = load_config(_write(tmp_path, f"camera:\n  pitch_deg: {value}\n"))
+    assert cfg.camera.pitch_deg == value
+
+
+def test_map_tile_attribution_is_plain_text(tmp_path):
+    cfg = load_config(_write(tmp_path, 'api:\n  map_tile_attribution: "Tiles <b>&</b> Esri"\n'))
+    assert cfg.api.map_tile_attribution == "Tiles <b>&</b> Esri"  # escaped where it is shown
 
 
 def test_map_tile_url_accepts_http(tmp_path):
@@ -371,6 +386,23 @@ def test_srt_path_ignored_for_other_types(tmp_path):
 def test_telemetry_connection_rejects_non_udp_serial(tmp_path, conn):
     p = _write(tmp_path, f"telemetry:\n  type: mavlink\n  connection: '{conn}'\n")
     with pytest.raises(ConfigError, match=r"telemetry\.connection.*UDP"):
+        load_config(p)
+
+
+@pytest.mark.parametrize("ttype", ["none", "dji_srt"])
+def test_telemetry_connection_ignored_unless_mavlink(tmp_path, ttype):
+    # a leftover link under another type must not stop the engine from starting
+    _video(tmp_path)
+    (tmp_path / "flight.srt").write_text("x")
+    p = _write(tmp_path, "source:\n  path: flight.mp4\n"
+               f"telemetry:\n  type: {ttype}\n  connection: 'tcp:127.0.0.1:5760'\n")
+    assert load_config(p).telemetry.type == ttype
+
+
+@pytest.mark.parametrize("conn", ["udpout:10.0.0.2:14550", "udpbcast:192.168.1.255:14550"])
+def test_telemetry_connection_rejects_sending_udp(tmp_path, conn):
+    p = _write(tmp_path, f"telemetry:\n  type: mavlink\n  connection: '{conn}'\n")
+    with pytest.raises(ConfigError, match=r"telemetry\.connection.*only listens"):
         load_config(p)
 
 

@@ -137,3 +137,16 @@ test("stop while a reconnect is pending cancels the timer", () => {
   vi.advanceTimersByTime(60_000);
   expect(FakeWS.all).toHaveLength(1);
 });
+
+test("delivers telemetry messages and drops malformed ones", () => {
+  const { msgs } = start();
+  FakeWS.all[0].open();
+  const latest = { lat: 1, lon: 2, alt_agl_m: 30, yaw_deg: 90, t_iso: "2026-11-06T06:00:00Z" };
+  FakeWS.all[0].message(JSON.stringify({ api: 1, type: "telemetry", latest }));
+  FakeWS.all[0].message(JSON.stringify({ api: 1, type: "telemetry", latest: null }));
+  FakeWS.all[0].message(JSON.stringify({ api: 1, type: "telemetry" }));
+  expect(msgs).toEqual([
+    { api: 1, type: "telemetry", latest },
+    { api: 1, type: "telemetry", latest: null },
+  ]);
+});

@@ -1,3 +1,4 @@
+import errno
 import math
 import os
 import socket
@@ -68,10 +69,10 @@ def wait_for(pred, timeout=DEADLINE_S):
 def tel_factory():
     made = []
 
-    def make(conn, clock=time.time, stale_after_s=2.0, max_age_s=0.5, monotonic=None):
+    def make(conn, clock=time.time, stale_after_s=2.0, max_age_s=0.5, monotonic=None, **kw):
         t = MavlinkTelemetry("udpin:127.0.0.1:1", max_age_s, stale_after_s,
                              conn_factory=lambda c: conn, clock=clock,
-                             monotonic=monotonic or clock)
+                             monotonic=monotonic or clock, **kw)
         made.append(t)
         t.start()
         return t
@@ -107,6 +108,26 @@ def test_defaults_without_attitude_or_gimbal(tel_factory):
     assert p.yaw_deg == pytest.approx(180.0)  # hdg fallback
     assert p.cam_pitch_deg == -90.0
     assert p.cam_roll_deg == 0.0
+    assert p.pitch_assumed and not p.yaw_assumed and not p.alt_assumed
+
+
+def test_measured_attitude_and_gimbal_are_not_assumed(tel_factory):
+    conn = FakeConn([att(0.5), Msg("MOUNT_STATUS", pointing_a=-4500, pointing_b=0), gpi()])
+    t = tel_factory(conn)
+    assert wait_for(lambda: t.latest() is not None)
+    p = t.latest()
+    assert (p.pitch_assumed, p.yaw_assumed, p.alt_assumed) == (False, False, False)
+
+
+def test_configured_pitch_used_until_a_gimbal_message(tel_factory):
+    conn = FakeConn([gpi(lat=1.0)])
+    t = tel_factory(conn, pitch_deg=-60.0)
+    assert wait_for(lambda: t.latest() is not None)
+    p = t.latest()
+    assert (p.cam_pitch_deg, p.cam_roll_deg, p.pitch_assumed) == (-60.0, 0.0, False)
+    conn.push(Msg("MOUNT_STATUS", pointing_a=-3000, pointing_b=0), gpi(lat=2.0))
+    assert wait_for(lambda: t.latest().lat == pytest.approx(2.0))
+    assert t.latest().cam_pitch_deg == pytest.approx(-30.0)  # measured wins
 
 
 def test_negative_yaw_normalised(tel_factory):
@@ -202,6 +223,68 @@ def test_reconnects_after_error_without_leaking_connection_string(caplog):
     t.stop()  # idempotent
 
 
+class _WinSockInUse(OSError):
+    winerror = 10048  # WSAEADDRINUSE, as Windows reports it
+
+
+def _serial_error(text):
+    import serial
+
+    return serial.SerialException(text)
+
+
+@pytest.mark.parametrize("conn, make_exc, kind, hint", [
+    ("udpin:127.0.0.1:14550", lambda: OSError(errno.EADDRINUSE, "secret-text"), "udpin",
+     "UDP port already in use — is a ground station listening on it?"),
+    ("udpin:0.0.0.0:14550", lambda: _WinSockInUse("secret-text"), "udpin",
+     "UDP port already in use — is a ground station listening on it?"),
+    ("COM5,57600", lambda: PermissionError(errno.EACCES, "secret-text"), "serial",
+     "serial port is open in another program"),
+    # pyserial on Windows: the cause is only inside the message
+    ("COM5", lambda: _serial_error(
+        "could not open port 'COM5': PermissionError(13, 'Access is denied.', None, 5)"),
+     "serial", "serial port is open in another program"),
+    ("COM7", lambda: _serial_error(
+        "could not open port 'COM7': FileNotFoundError(2, 'The system cannot find the file "
+        "specified.', None, 2)"), "serial", "serial port not found"),
+])
+def test_connection_failure_logs_a_hint_but_no_details(conn, make_exc, kind, hint, caplog):
+    calls = []
+
+    def factory(c):
+        calls.append(c)
+        raise make_exc()
+
+    t = MavlinkTelemetry(conn, 0.5, 2.0, conn_factory=factory, backoff_initial=0.05)
+    with caplog.at_level("WARNING"):
+        t.start()
+        try:
+            assert wait_for(lambda: len(calls) >= 1 and "connection failed" in caplog.text)
+        finally:
+            t.stop()
+    line = next(r.getMessage() for r in caplog.records if "connection failed" in r.getMessage())
+    assert line.startswith(f"MAVLink {kind} connection failed: ")
+    assert hint in line
+    for secret in ("secret-text", "COM5", "COM7", "14550", "127.0.0.1", "0.0.0.0", "57600",
+                   "Access is denied", "could not open"):
+        assert secret not in caplog.text
+
+
+def test_connection_failure_shows_the_error_number(caplog):
+    def factory(c):
+        raise OSError(errno.EADDRINUSE, "secret-text")
+
+    t = MavlinkTelemetry("udpin:127.0.0.1:14550", 0.5, 2.0, conn_factory=factory,
+                         backoff_initial=0.05)
+    with caplog.at_level("WARNING"):
+        t.start()
+        try:
+            assert wait_for(lambda: "connection failed" in caplog.text)
+        finally:
+            t.stop()
+    assert f"OSError (errno {errno.EADDRINUSE})" in caplog.text
+
+
 def test_udp_loopback_real_messages():
     from pymavlink import mavutil
 
@@ -261,6 +344,7 @@ def test_hdg_unknown_gives_zero_yaw(tel_factory):
     t = tel_factory(FakeConn([gpi(hdg=65535)]))
     assert wait_for(lambda: t.latest() is not None)
     assert t.latest().yaw_deg == 0.0
+    assert t.latest().yaw_assumed
 
 
 def test_yaw_never_reaches_360(tel_factory):
@@ -331,11 +415,18 @@ def test_rejects_non_udp_serial_connection(conn):
 
 
 @pytest.mark.parametrize("conn", [
-    "udpin:0.0.0.0:14550", "udp:127.0.0.1:1", "udpout:10.0.0.2:14550",
-    "udpbcast:192.168.1.255:14550", "COM5", "com12,57600", "/dev/ttyUSB0,115200",
+    "udpin:0.0.0.0:14550", "udp:127.0.0.1:1", "COM5", "com12,57600", "/dev/ttyUSB0,115200",
 ])
 def test_accepts_udp_and_serial_connection(conn):
     MavlinkTelemetry(conn, 0.5, 2.0, conn_factory=lambda c: None)
+
+
+@pytest.mark.parametrize("conn", ["udpout:10.0.0.2:14550", "udpbcast:192.168.1.255:14550"])
+def test_rejects_sending_udp_schemes(conn):
+    # sky-eye only listens: with an outbound link the drone never learns where to send
+    with pytest.raises(ValueError, match=r"telemetry\.connection.*only listens") as e:
+        MavlinkTelemetry(conn, 0.5, 2.0, conn_factory=lambda c: None)
+    assert "10.0.0.2" not in str(e.value) and "192.168" not in str(e.value)
 
 
 def test_serial_connection_fails_with_oserror_not_missing_module():

@@ -29,6 +29,9 @@ function parseMessage(data: unknown): LiveMessage | null {
   if ((o.type === "truck.new" || o.type === "truck.updated") && isObj(o.truck)) {
     return m as LiveMessage;
   }
+  if (o.type === "telemetry" && "latest" in o && (o.latest === null || isObj(o.latest))) {
+    return m as LiveMessage;
+  }
   return null;
 }
 

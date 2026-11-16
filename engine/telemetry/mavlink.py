@@ -1,6 +1,7 @@
 """Live MAVLink telemetry (PX4/ArduPilot over UDP or serial)."""
 from __future__ import annotations
 
+import errno
 import logging
 import math
 import os
@@ -25,9 +26,50 @@ _TRACK_CAPACITY = 1800  # 30 minutes at one pose per second
 _HDG_UNKNOWN = 65535
 
 
-def _scheme(connection: str) -> str:
-    """Only the part before the first ':' - the rest may carry credentials."""
-    return connection.split(":", 1)[0]
+_WSAEADDRINUSE = 10048
+_WSAEACCES = 10013
+_ERROR_ACCESS_DENIED = 5
+_ERROR_FILE_NOT_FOUND = 2
+
+
+def _kind(connection: str) -> str:
+    """"udp"/"udpin" or "serial": never the address, port or port name."""
+    return connection.split(":", 1)[0].lower() if connection[:3].lower() == "udp" else "serial"
+
+
+def _hint(exc: BaseException, num: object, win: object, serial: bool) -> str | None:
+    if serial:
+        # pyserial on Windows names the cause only inside its message: it is looked
+        # at here, never logged (it holds the port name)
+        try:
+            text = str(exc)
+        except Exception:  # noqa: BLE001
+            text = ""
+        if (isinstance(exc, PermissionError) or num in (errno.EACCES, errno.EBUSY)
+                or win == _ERROR_ACCESS_DENIED or "PermissionError" in text
+                or "Access is denied" in text):
+            return "serial port is open in another program"
+        if (isinstance(exc, FileNotFoundError) or num == errno.ENOENT
+                or win == _ERROR_FILE_NOT_FOUND or "FileNotFoundError" in text):
+            return "serial port not found - check the port name"
+        return None
+    if num in (errno.EADDRINUSE, _WSAEADDRINUSE) or win == _WSAEADDRINUSE:
+        return "UDP port already in use — is a ground station listening on it?"
+    if num == _WSAEACCES or win == _WSAEACCES:
+        return "UDP port blocked - another program holds it"
+    return None
+
+
+def _failure(exc: BaseException, connection: str) -> str:
+    """The exception type, its error numbers and a hint; never str(exc), which may
+    carry the connection string."""
+    num, win = getattr(exc, "errno", None), getattr(exc, "winerror", None)
+    codes = [f"errno {num}"] if isinstance(num, int) else []
+    if isinstance(win, int) and win != num:
+        codes.append(f"winerror {win}")
+    text = type(exc).__name__ + (f" ({', '.join(codes)})" if codes else "")
+    hint = _hint(exc, num, win, _kind(connection) == "serial")
+    return f"{text}: {hint}" if hint else text
 
 
 def _norm_yaw(deg: float) -> float:
@@ -47,6 +89,7 @@ class MavlinkTelemetry:
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         backoff_initial: float = 1.0,
+        pitch_deg: float | None = None,
     ) -> None:
         validate_connection(connection)  # UDP or serial only (a dead TCP link spins pymavlink)
         self._connection = connection
@@ -63,6 +106,7 @@ class MavlinkTelemetry:
         self._gimbal: tuple[float, float] | None = None
         self._noted_gimbal = False
         self._has_quaternion = False  # quaternion gimbal data wins over MOUNT_STATUS
+        self._pitch_deg = pitch_deg  # camera.pitch_deg: used until a gimbal message arrives
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -117,8 +161,8 @@ class MavlinkTelemetry:
             except Exception as e:  # noqa: BLE001 - telemetry must never stop detection
                 if stop.is_set():
                     break
-                log.warning("MAVLink %s connection failed: %s", _scheme(self._connection),
-                            type(e).__name__)
+                log.warning("MAVLink %s connection failed: %s", _kind(self._connection),
+                            _failure(e, self._connection))
                 self._close_conn()
                 stop.wait(self._backoff.next_delay())
         self._close_conn()
@@ -152,17 +196,28 @@ class MavlinkTelemetry:
             return
         now = self._clock()
         yaw = self._yaw_deg
+        yaw_assumed = False
         if yaw is None:
-            yaw = _norm_yaw(msg.hdg / 100.0) if msg.hdg != _HDG_UNKNOWN else 0.0
+            if msg.hdg != _HDG_UNKNOWN:
+                yaw = _norm_yaw(msg.hdg / 100.0)
+            else:
+                yaw, yaw_assumed = 0.0, True  # no ATTITUDE and no heading
         gimbal = self._gimbal
+        pitch_assumed = False
         if gimbal is None:
+            if self._pitch_deg is not None:
+                gimbal = (self._pitch_deg, 0.0)
+            else:
+                gimbal, pitch_assumed = (-90.0, 0.0), True
             if not self._noted_gimbal:
                 self._noted_gimbal = True
-                log.info("no MAVLink gimbal message yet; assuming camera straight down (-90)")
-            gimbal = (-90.0, 0.0)
+                log.info("no MAVLink gimbal message yet; %s",
+                         "using camera.pitch_deg" if self._pitch_deg is not None else
+                         "assuming camera straight down (-90), locations are unreliable")
         pose = DronePose(
             ts=now, lat=lat, lon=lon, alt_agl_m=alt, yaw_deg=yaw,
             cam_pitch_deg=gimbal[0], cam_roll_deg=gimbal[1],
+            pitch_assumed=pitch_assumed, yaw_assumed=yaw_assumed,
         )
         with self._lock:
             self._last_pos_mono = self._monotonic()  # before the pose becomes visible

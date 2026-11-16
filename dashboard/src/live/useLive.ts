@@ -78,9 +78,10 @@ export function useLive(client: ApiClient, opts: UseLiveOptions = {}): LiveData 
           const isNew = !trucksRef.current.some((t) => t.id === m.truck.id);
           apply([m.truck]);
           if (isNew) onNewRef.current?.(m.truck);
-        } else {
+        } else if (m.type === "truck.updated") {
           apply([m.truck]);
         }
+        // "telemetry" is for the map page; the live page ignores it.
       },
       onState: (s) => {
         if (cancelled) return;

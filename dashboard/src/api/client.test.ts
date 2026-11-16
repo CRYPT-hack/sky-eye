@@ -126,3 +126,18 @@ test("sendTestAlert surfaces the API error", async () => {
     message: "no alert channels configured",
   });
 });
+
+test("getTelemetry asks for the seconds and returns the body without api", async () => {
+  const body = {
+    api: 1,
+    state: "ok",
+    latest: { lat: 1, lon: 2, alt_agl_m: 30, yaw_deg: 90, t_iso: "2026-11-06T06:00:00Z" },
+    track: [[1, 2]],
+  };
+  const f = vi.fn(async () => json(body));
+  const r = await mk("abc", f).getTelemetry(300);
+  expect(r).toEqual({ state: "ok", latest: body.latest, track: [[1, 2]] });
+  const [url, init] = f.mock.calls[0] as unknown as Call;
+  expect(url).toBe("/api/telemetry?seconds=300");
+  expect(new Headers(init?.headers).get("X-SkyEye-Token")).toBe("abc");
+});

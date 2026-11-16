@@ -581,6 +581,29 @@ def test_better_snapshot_does_not_downgrade_ok_location(tmp_path):
         rig.close()
 
 
+POSE_GUESSED = DronePose(0.0, 48.0, 11.0, 50.0, 0.0, -45.0, pitch_assumed=True)
+
+
+def test_better_snapshot_does_not_downgrade_unreliable_to_unknown(tmp_path):
+    tel = FakeTelemetry(POSE_GUESSED)
+    rig = Rig(tmp_path, telemetry=tel)
+    try:
+        rig.feed(0, 0.0, result(0.6))
+        first = rig.repo.get_truck(1)
+        assert first.geo_status == "unreliable" and first.lat is not None
+        tel.pose = None  # a telemetry gap, but a better snapshot arrives
+        rig.feed(1, 0.5, result(0.7))
+        rec = rig.repo.get_truck(1)
+        assert rec.best_score == 0.7
+        assert (rec.lat, rec.lon, rec.geo_error_m, rec.geo_status) == (
+            first.lat, first.lon, first.geo_error_m, "unreliable")
+        tel.pose = POSE_DOWN  # a better fix still replaces it
+        rig.feed(2, 1.0, result(0.9))
+        assert rig.repo.get_truck(1).geo_status == "ok"
+    finally:
+        rig.close()
+
+
 def test_better_snapshot_upgrades_unknown_location(tmp_path):
     tel = FakeTelemetry(None)
     rig = Rig(tmp_path, telemetry=tel)

@@ -20,9 +20,9 @@ A = 6378137.0
 E2 = 0.00669437999014
 
 
-def _pose(yaw=0.0, pitch=-90.0, roll=0.0, alt=100.0) -> DronePose:
+def _pose(yaw=0.0, pitch=-90.0, roll=0.0, alt=100.0, **assumed) -> DronePose:
     return DronePose(ts=0.0, lat=45.0, lon=10.0, alt_agl_m=alt, yaw_deg=yaw,
-                     cam_pitch_deg=pitch, cam_roll_deg=roll)
+                     cam_pitch_deg=pitch, cam_roll_deg=roll, **assumed)
 
 
 def _offset_m(pose: DronePose, fix: GeoFix) -> tuple[float, float]:
@@ -145,3 +145,74 @@ def test_error_over_200m_unreliable():
 def test_no_pose_unknown():
     fix = geolocate((450.0, 400.0, 550.0, 500.0), SQUARE, None, HFOV)
     assert fix == GeoFix(None, None, None, "unknown")
+
+
+def test_roll_pitch_yaw_combined():
+    # Bottom-centre (600, 450): 0.2 right, 0.1 up (image units of f). Roll 90 turns
+    # image-right into down: 0.1 right, 0.2 down. Pitch -45 then aims that ray
+    # atan(0.2) = 11.31 deg further below the boresight: depression 56.31 deg,
+    # tan = (sin45 + 0.2 cos45) / (cos45 - 0.2 sin45) = 1.2 / 0.8 = 1.5, so the ground
+    # point is 100 / 1.5 = 66.6667 m ahead and t * 0.1 = 100 * 0.1 / (1.2 sin45)
+    # = 11.7851 m to the right. Yaw 120: ahead = (sin120, cos120), right = (cos120, -sin120).
+    pose = _pose(yaw=120.0, pitch=-45.0, roll=90.0)
+    fix = geolocate((560.0, 400.0, 640.0, 450.0), SQUARE, pose, HFOV)
+    assert fix.status == "ok"
+    ahead, right = 100.0 / 1.5, 11.785113
+    s, c = math.sin(math.radians(120.0)), math.cos(math.radians(120.0))
+    _assert_offset(pose, fix, east=ahead * s + right * c, north=ahead * c - right * s)
+    # slant^2 = 100^2 + 66.6667^2 + 11.7851^2 = 14583.33; sin(depression) = 100 / slant,
+    # so error = 3 + slant * tan(2) / sin = 3 + tan(2) * slant^2 / 100 = 3 + 5.092612
+    assert fix.error_m == pytest.approx(8.092612, abs=1e-6)
+
+
+def test_assumed_pitch_is_unreliable_with_at_least_200m():
+    # A log without camera angles: the point is kept (for the circle), never "ok".
+    centre = (450.0, 400.0, 550.0, 500.0)
+    pose = _pose(pitch_assumed=True)
+    fix = geolocate(centre, SQUARE, pose, HFOV)
+    assert fix.status == "unreliable"
+    assert (fix.lat, fix.lon) == (pytest.approx(45.0), pytest.approx(10.0))
+    assert fix.error_m == 200.0  # computed 6.49 m, raised to the 200 m floor
+    # a larger computed error is kept as it is
+    fix = geolocate(centre, SQUARE, _pose(pitch=-7.0, pitch_assumed=True), HFOV)
+    assert fix.status == "unreliable"
+    assert fix.error_m == pytest.approx(238.12286, abs=1e-4)
+
+
+def test_assumed_altitude_is_unreliable_with_at_least_200m():
+    pose = _pose(alt_assumed=True)
+    fix = geolocate((560.0, 400.0, 640.0, 450.0), SQUARE, pose, HFOV)
+    assert fix.status == "unreliable"
+    _assert_offset(pose, fix, east=20.0, north=10.0)
+    assert fix.error_m == 200.0
+
+
+def test_assumed_yaw_adds_the_rotation_error():
+    # Nadir, 20 m E / 10 m N of the drone: slant^2 = 100^2 + 20^2 + 10^2 = 10500, so the
+    # usual error is 3 + tan(2) * 10500 / 100 = 6.666681. With the heading unknown the
+    # truck can be anywhere on the circle of radius sqrt(500) about the drone: 2 * 22.3607 more.
+    pose = _pose(yaw_assumed=True)
+    fix = geolocate((560.0, 400.0, 640.0, 450.0), SQUARE, pose, HFOV)
+    assert fix.status == "ok"
+    assert fix.error_m == pytest.approx(3.0 + TAN2 * 105.0 + 2 * math.sqrt(500.0), abs=1e-6)
+    # straight below the drone the heading does not matter
+    fix = geolocate((450.0, 300.0, 550.0, 500.0), SQUARE, pose, HFOV)
+    assert fix.error_m == pytest.approx(6.492077, abs=1e-6) and fix.status == "ok"
+    # 100 m ahead: 9.984154 + 200 = 209.98 m > 200 -> unreliable, point kept
+    pose = _pose(pitch=-45.0, yaw_assumed=True)
+    fix = geolocate((450.0, 400.0, 550.0, 500.0), SQUARE, pose, HFOV)
+    assert fix.status == "unreliable"
+    assert fix.error_m == pytest.approx(3.0 + 200.0 * TAN2 + 200.0, abs=1e-6)
+    _assert_offset(pose, fix, east=0.0, north=100.0)
+
+
+def test_assumed_yaw_and_pitch_use_the_pitch_rule_only():
+    # the yaw term is for a known pitch; an assumed pitch already gives max(error, 200)
+    pose = _pose(pitch=-45.0, yaw_assumed=True, pitch_assumed=True)
+    fix = geolocate((450.0, 400.0, 550.0, 500.0), SQUARE, pose, HFOV)
+    assert fix.status == "unreliable" and fix.error_m == 200.0
+
+
+def test_assumed_flags_default_to_measured():
+    p = DronePose(0.0, 45.0, 10.0, 100.0, 0.0, -90.0)
+    assert (p.pitch_assumed, p.yaw_assumed, p.alt_assumed) == (False, False, False)

@@ -1,5 +1,11 @@
 import { expect, test } from "vitest";
-import { formatDuration, formatScore, formatSourceState, formatTime } from "./format";
+import {
+  formatDuration,
+  formatScore,
+  formatSourceState,
+  formatTelemetryState,
+  formatTime,
+} from "./format";
 
 test("formatTime uses local zone", () => {
   const now = new Date("2026-11-06T08:00:00Z");
@@ -46,4 +52,13 @@ test("connecting source state has a label", () => {
 test("reconnecting source state has a label", async () => {
   const { formatSourceState } = await import("./format");
   expect(formatSourceState("reconnecting")).toBe("Reconnecting");
+});
+
+test("formatTelemetryState labels the drone position states and passes unknown ones through", () => {
+  expect(formatTelemetryState("none")).toBe("Off");
+  expect(formatTelemetryState("waiting")).toBe("Waiting");
+  expect(formatTelemetryState("ok")).toBe("OK");
+  expect(formatTelemetryState("stale")).toBe("Stale");
+  expect(formatTelemetryState("off")).toBe("off");
+  expect(formatTelemetryState("toString")).toBe("toString");
 });
