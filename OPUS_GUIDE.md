@@ -381,6 +381,19 @@ A customer pays for a **number or an alert they can trust**: "37 trucks left the
 3. It produces a report the customer can keep.
 4. A short demo video on freely licensed footage, and a results page.
 
+### 9.2a Market research and chosen direction (18 Nov 2026)
+
+- The owner decided: **civilian security and safety only**. No military, defence or targeting customers. Watch vehicles and areas, not individual people. He turned down a pitch to General Cherry, a Ukrainian FPV strike-drone maker.
+- The research report is in `auto detection/reports/India drone security startup market.md`, outside the repo; its notes are in `auto detection/research_notes/`.
+- **Recommended first segment:** mining and minor-mineral (sand, stone) truck monitoring, sold through drone-survey firms that already fly mines. **Backup segment:** highway construction contractors who must already record monthly drone video for NHAI.
+- **Roadmap stages:**
+  - Stage 0: fix the product (Plans 4A, 4, 6).
+  - Stage 1: free pilot.
+  - Stage 2: paid pilot.
+  - Stage 3: repeatable offer.
+  - Stage 4: scale.
+- **Caveat:** no buyer was found asking for drone vehicle counting yet. Treat the segment as a hypothesis to test with a pilot.
+
 ### 9.3 Questions only the owner can answer
 
 Ask these at the start of Step 2. The answers change what gets built.
