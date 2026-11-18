@@ -102,6 +102,18 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_sheets(args: argparse.Namespace) -> int:
+    from engine.evaluation.sheets import sheets
+
+    cache_path, video = Path(args.cache), Path(args.video)
+    cache = load_cache(cache_path)
+    out = Path(args.out) if args.out else Path("eval/review") / video.stem
+    n_refs, n_cands, n_sheets = sheets(cache, video, out, cache_name=cache_path.name)
+    print(f"refs={n_refs} candidates={n_cands} sheets={n_sheets}")
+    print(f"wrote {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m engine.evaluation")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -121,6 +133,11 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--fps-budget", type=float, default=None)
     r.add_argument("--out", default=None)
     r.set_defaults(func=_cmd_replay)
+    s = sub.add_parser("sheets", help="write review sheets and a truth template for labelling")
+    s.add_argument("--cache", required=True)
+    s.add_argument("--video", required=True)
+    s.add_argument("--out", default=None)
+    s.set_defaults(func=_cmd_sheets)
     args = parser.parse_args(argv)
     return args.func(args)
 
