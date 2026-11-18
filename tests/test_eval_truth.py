@@ -37,7 +37,8 @@ def test_candidates_need_a_truck_label():
     assert len(cands) == 2
     for r in cands:
         assert r.class_votes.get("truck", 0) > 0
-        assert r.best_truck_score >= 0.2
+        assert r.best_truck_score >= 0.25
+        assert r.track.hits >= 8
     # a car track carries no truck score
     car = [r for r in refs if "truck" not in r.class_votes]
     assert car and all(r.best_truck_score == 0.0 for r in car)
@@ -125,9 +126,33 @@ def test_sheets_writes_pngs_and_template(tmp_path):
     tpl = json.loads((out / "truth_template.json").read_text(encoding="utf-8"))
     assert tpl["candidates"] == ["R1", "R2", "R3", "R4", "R5"]
     assert tpl["video"] == "tiny.mp4" and tpl["frames"] == n
+    assert tpl["reference"]["candidate_min_hits"] == 8
     assert tpl["trucks"] == [] and tpl["cache"] == "tiny__m.npz"
     refs = load_refs(out / "refs.json")
     assert [r.ref_id for r in refs] == tpl["candidates"]
     # the tracker confirms a new track from its second frame on
     assert refs[0].class_votes == {"truck": n - 1}
     assert len(refs[0].track.boxes) == n - 1
+
+
+def test_candidates_gate_hits_span_and_merged_truck_evidence():
+    # one vehicle: car 0.6 on top, truck 0.3 duplicate underneath, for 1 s
+    # a second one lasts only 4 frames; a third is a plain car
+    fps = 10.0
+    frames = []
+    for i in range(10):
+        dets = [
+            Detection((10, 10, 50, 50), 0.6, "car"),
+            Detection((10, 10, 50, 48), 0.3, "truck"),
+            Detection((200, 200, 240, 240), 0.9, "car"),
+        ]
+        if i < 4:
+            dets.append(Detection((400, 100, 440, 140), 0.8, "truck"))
+        frames.append(CachedFrame(i, i / fps, tuple(dets)))
+    cache = DetectionCache("x", 640, 480, fps, "m", 0, 0.05, ("car", "truck"), frames)
+    refs = reference_tracks(cache)
+    assert len(refs) == 3
+    cands = candidates(refs)
+    assert len(cands) == 1
+    assert cands[0].class_votes == {"car": 9}
+    assert cands[0].best_truck_score == 0.3

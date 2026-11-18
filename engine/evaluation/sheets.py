@@ -11,6 +11,9 @@ import numpy as np
 
 from engine.evaluation.cache import DetectionCache
 from engine.evaluation.reference import (
+    CANDIDATE_MIN_HITS,
+    CANDIDATE_MIN_SPAN_S,
+    CANDIDATE_TRUCK_SCORE,
     REF_FLOOR,
     REF_LOST_TIMEOUT_S,
     RefTrack,
@@ -181,7 +184,14 @@ def sheets(
         "frames": len(cache.frames),
         "fps": cache.fps,
         "cache": cache_name,
-        "reference": {"floor": REF_FLOOR, "lost_timeout_s": REF_LOST_TIMEOUT_S},
+        "reference": {
+            "floor": REF_FLOOR,
+            "lost_timeout_s": REF_LOST_TIMEOUT_S,
+            "merge_iou": 0.7,
+            "candidate_min_truck_score": CANDIDATE_TRUCK_SCORE,
+            "candidate_min_hits": CANDIDATE_MIN_HITS,
+            "candidate_min_span_s": CANDIDATE_MIN_SPAN_S,
+        },
         "candidates": [r.ref_id for r in cands],
         "trucks": [],
         "not_truck": [],

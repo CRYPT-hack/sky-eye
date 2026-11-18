@@ -63,3 +63,34 @@ def test_detect_uses_confidence_and_configured_classes():
     out = make(m).detect(IMG)
     assert m.calls == [0.5]
     assert out == []  # the truck scored 0.3 < 0.5 anyway; car and bus are not configured
+
+
+def test_merge_class_duplicates_overlap():
+    from engine.detectors.filtering import merge_class_duplicates
+
+    a = Detection((0.0, 0.0, 10.0, 10.0), 0.3, "truck")
+    b = Detection((0.0, 0.0, 10.0, 9.0), 0.5, "car")
+    out = merge_class_duplicates([a, b])
+    assert len(out) == 1
+    assert out[0][0] is b
+    assert out[0][1] == {"car": 0.5, "truck": 0.3}
+
+
+def test_merge_class_duplicates_separate_and_ordered():
+    from engine.detectors.filtering import merge_class_duplicates
+
+    a = Detection((0.0, 0.0, 10.0, 10.0), 0.3, "truck")
+    b = Detection((50.0, 50.0, 60.0, 60.0), 0.6, "car")
+    out = merge_class_duplicates([a, b])
+    assert [o[0] for o in out] == [b, a]
+
+
+def test_merge_class_duplicates_tie_uses_input_order():
+    from engine.detectors.filtering import merge_class_duplicates
+
+    a = Detection((0.0, 0.0, 10.0, 10.0), 0.4, "truck")
+    b = Detection((0.0, 0.0, 10.0, 10.0), 0.4, "car")
+    out = merge_class_duplicates([a, b])
+    assert len(out) == 1 and out[0][0] is a
+    assert out[0][1] == {"truck": 0.4, "car": 0.4}
+    assert merge_class_duplicates([b, a])[0][0] is b

@@ -15,14 +15,16 @@ import numpy as np
 
 from engine.config import TrackerConfig
 from engine.core import Frame
-from engine.detectors.filtering import filter_detections
+from engine.detectors.filtering import filter_detections, merge_class_duplicates
 from engine.evaluation.cache import DetectionCache
 from engine.evaluation.replay import TruckTrack
 from engine.tracking import build_tracker
 
 REF_FLOOR = 0.1
 REF_LOST_TIMEOUT_S = 3.0
-CANDIDATE_TRUCK_SCORE = 0.2
+CANDIDATE_TRUCK_SCORE = 0.25
+CANDIDATE_MIN_HITS = 8
+CANDIDATE_MIN_SPAN_S = 0.5
 
 _EPOCH = datetime(2000, 1, 1, tzinfo=timezone.utc)
 _DUMMY_IMAGE = np.zeros((1, 1, 3), dtype=np.uint8)
@@ -51,10 +53,13 @@ def reference_tracks(cache: DetectionCache) -> list[RefTrack]:
             wall_time=_EPOCH + timedelta(seconds=cf.ts),
             index=cf.index,
         )
-        dets = filter_detections(list(cf.detections), cache.classes, REF_FLOOR)
-        result = tracker.update(dets, frame)
+        kept = filter_detections(list(cf.detections), cache.classes, REF_FLOOR)
+        merged = merge_class_duplicates(kept)
+        per_class = {id(top): scores for top, scores in merged}
+        result = tracker.update([top for top, _ in merged], frame)
         for t in result.confirmed:
-            d = t.detection  # the very object passed in, so class_name is its own
+            d = t.detection  # the very object passed in
+            truck_score = per_class[id(d)].get("truck", 0.0)
             tt = tracks.get(t.track_id)
             if tt is None:
                 tt = tracks[t.track_id] = TruckTrack(t.track_id, cf.ts, cf.ts, 0, d.score)
@@ -65,8 +70,7 @@ def reference_tracks(cache: DetectionCache) -> list[RefTrack]:
             tt.best_score = max(tt.best_score, d.score)
             tt.boxes.append((cf.ts, d.box))
             votes[t.track_id][d.class_name] += 1
-            if d.class_name == "truck":
-                best_truck[t.track_id] = max(best_truck[t.track_id], d.score)
+            best_truck[t.track_id] = max(best_truck[t.track_id], truck_score)
     order = sorted(tracks.values(), key=lambda tt: (tt.first_ts, tt.track_id))
     return [
         RefTrack(f"R{i}", tt, dict(votes[tt.track_id]), best_truck[tt.track_id])
@@ -75,8 +79,14 @@ def reference_tracks(cache: DetectionCache) -> list[RefTrack]:
 
 
 def candidates(refs: list[RefTrack]) -> list[RefTrack]:
-    """Refs with at least one truck-labelled box scoring >= 0.2."""
-    return [r for r in refs if r.best_truck_score >= CANDIDATE_TRUCK_SCORE]
+    """Refs with truck evidence >= 0.25, at least 8 confirmed hits and a span >= 0.5 s."""
+    return [
+        r
+        for r in refs
+        if r.best_truck_score >= CANDIDATE_TRUCK_SCORE
+        and r.track.hits >= CANDIDATE_MIN_HITS
+        and r.track.last_ts - r.track.first_ts >= CANDIDATE_MIN_SPAN_S
+    ]
 
 
 def save_refs(refs: list[RefTrack], path: Path) -> None:
