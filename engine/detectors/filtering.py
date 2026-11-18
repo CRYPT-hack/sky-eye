@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from engine.config import DetectorConfig
 from engine.core import Detection
 
 
@@ -14,3 +15,13 @@ def filter_detections(
     """
     wanted = set(classes)
     return [d for d in raw if d.class_name in wanted and d.score >= min_score]
+
+
+def prepare_detections(
+    raw: list[Detection], cfg: DetectorConfig, confidence: float
+) -> list[Detection]:
+    """The one detection step shared by the live pipeline and offline replay.
+
+    Later tracking fixes extend this function, so both paths stay identical.
+    """
+    return filter_detections(raw, cfg.classes, confidence)

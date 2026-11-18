@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import numpy as np
 
@@ -19,3 +19,9 @@ class FakeDetector:
         out = self._script(self._calls)
         self._calls += 1
         return out
+
+    def detect_raw(
+        self, image: np.ndarray, floor: float, class_names: Sequence[str]
+    ) -> list[Detection]:
+        # goes through detect() so subclasses that override it keep working
+        return self.detect(image)

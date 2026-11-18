@@ -13,7 +13,9 @@ import cv2
 from pydantic import BaseModel, ConfigDict, Field
 
 from engine.annotate import annotate
+from engine.config import DetectorConfig
 from engine.core import Detector, Frame, Track, Tracker, VideoSource
+from engine.detectors.filtering import prepare_detections
 from engine.events.evidence import EvidenceRecorder
 from engine.events.manager import EventManager
 from engine.telemetry import NoTelemetry, Telemetry
@@ -132,7 +134,9 @@ class Pipeline:
         realtime: bool,
         stream_max_width: int = 1280,
         telemetry: Telemetry | None = None,
+        detector_cfg: DetectorConfig | None = None,
     ) -> None:
+        self._detector_cfg = detector_cfg
         self._telemetry: Telemetry = telemetry if telemetry is not None else NoTelemetry()
         self._telemetry_started = False
         self._source = source
@@ -368,8 +372,16 @@ class Pipeline:
         self._fail_suppressed = 0
 
     def _process(self, frame: Frame) -> None:
-        self._detector.confidence = self._runtime.confidence
-        detections = self._detector.detect(frame.image)
+        confidence = self._runtime.confidence
+        self._detector.confidence = confidence
+        cfg = self._detector_cfg
+        if cfg is None:  # tests with fake detectors that only implement detect()
+            detections = self._detector.detect(frame.image)
+        else:
+            raw = self._detector.detect_raw(  # type: ignore[attr-defined]
+                frame.image, floor=confidence, class_names=cfg.classes
+            )
+            detections = prepare_detections(raw, cfg, confidence)
         result = self._tracker.update(detections, frame)
         self._events.on_frame(frame, result)
         jpeg = self._encode(frame, result.confirmed)

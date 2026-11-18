@@ -74,6 +74,7 @@ class RFDETRDetector:
             raise DetectorError(f"unknown detector.classes {unknown}; must be COCO class names")
         self._id_to_name = {name_to_id[c]: c for c in classes}
         self.confidence = confidence
+        self._class_maps: dict[tuple[str, ...], dict[int, str]] = {}
 
         if model is None:
             if weights is not None and not Path(weights).is_file():
@@ -100,17 +101,26 @@ class RFDETRDetector:
                     log.warning("optimize_for_inference failed: %s", exc)
         self._model = model
 
-    def detect_raw(
-        self, image_bgr: np.ndarray, floor: float, class_names: Sequence[str]
-    ) -> list[Detection]:
-        """Every detection of the named COCO classes with score >= floor."""
+    def _class_map(self, class_names: tuple[str, ...]) -> dict[int, str]:
+        """COCO id -> name for the given classes; built once per tuple of names."""
+        cached = self._class_maps.get(class_names)
+        if cached is not None:
+            return cached
         from rfdetr.assets.coco_classes import COCO_CLASSES
 
         name_to_id = {name: int(cid) for cid, name in COCO_CLASSES.items()}
         unknown = [c for c in class_names if c not in name_to_id]
         if unknown:
             raise DetectorError(f"unknown class names {unknown}; must be COCO class names")
-        id_to_name = {name_to_id[c]: c for c in class_names}
+        mapping = {name_to_id[c]: c for c in class_names}
+        self._class_maps[class_names] = mapping
+        return mapping
+
+    def detect_raw(
+        self, image_bgr: np.ndarray, floor: float, class_names: Sequence[str]
+    ) -> list[Detection]:
+        """Every detection of the named COCO classes with score >= floor."""
+        id_to_name = self._class_map(tuple(class_names))
 
         rgb = np.ascontiguousarray(image_bgr[..., ::-1])
         dets = self._model.predict(rgb, threshold=floor, include_source_image=False)

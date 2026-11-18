@@ -126,6 +126,7 @@ class Rig:
         before_s: float = 0.3,
         after_s: float = 4.5,
         telemetry=None,
+        detector_cfg=None,
     ):
         self.data_dir = tmp_path / "data"
         self.repo = TruckRepository(self.data_dir / "sky-eye.db")
@@ -153,6 +154,7 @@ class Rig:
             realtime=realtime,
             stream_max_width=stream_max_width,
             telemetry=telemetry,
+            detector_cfg=detector_cfg,
         )
 
     def close(self):

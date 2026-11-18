@@ -264,6 +264,7 @@ def build_engine(cfg: AppConfig) -> EngineContext:
             realtime=cfg.source.realtime,
             stream_max_width=cfg.api.stream_max_width,
             telemetry=telemetry,
+            detector_cfg=cfg.detector,
         )
         notifiers = _build_notifiers(cfg, data_dir)
         dispatcher = AlertDispatcher(
